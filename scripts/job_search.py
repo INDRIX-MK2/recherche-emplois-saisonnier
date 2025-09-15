@@ -1,5 +1,11 @@
-# scripts/job_search.py — v1.2-patch (min 30 + filtre "Permis")
-import os, smtplib, ssl, math, time, re, urllib.parse
+# scripts/job_search.py — v1.3 (min 30, filtre "Permis", détail pour logement/secteur, retries, cache, logs par provider)
+import os
+import smtplib
+import ssl
+import math
+import time
+import re
+import urllib.parse
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from datetime import datetime
@@ -9,11 +15,13 @@ import requests
 from bs4 import BeautifulSoup
 from geopy.geocoders import Nominatim
 from geopy.extra.rate_limiter import RateLimiter
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 # -------- Config from env --------
-# NOTE: MAX_RESULTS est interprété ici comme un SEUIL MINIMUM d'attentes (on n'impose plus de plafond).
+# NOTE: MAX_RESULTS est ici un SEUIL MINIMUM attendu (on n'impose plus de plafond).
 ORIGIN_CITY = os.getenv("ORIGIN_CITY", "Clermont-Ferrand, France")
-MAX_RESULTS = int(os.getenv("MAX_RESULTS", "30"))  # Seuil MINIMUM attendu (pas un plafond)
+MAX_RESULTS = int(os.getenv("MAX_RESULTS", "30"))  # seuil minimum visé
 SECTORS = [s.strip().lower() for s in os.getenv("SECTORS", "hotellerie-restauration,agri-vendanges").split(",")]
 HOUSING_REQUIRED = os.getenv("HOUSING_REQUIRED", "true").lower() == "true"
 FALLBACK_CONTACTS = os.getenv("FALLBACK_CONTACTS", "true").lower() == "true"
@@ -26,18 +34,49 @@ SMTP_FROM = os.getenv("SMTP_FROM")
 RECIPIENTS = [e.strip() for e in os.getenv("RECIPIENTS", "").split(",") if e.strip()]
 
 NOMINATIM_EMAIL = os.getenv("NOMINATIM_EMAIL", "example@example.com")
-PROXY = os.getenv("PROXY")
+PROXY = os.getenv("PROXY")  # optionnel (peut rester None)
 
 HEADERS = {
-    "User-Agent": f"Mozilla/5.0 (compatible; JobSearchBot/1.2; +{NOMINATIM_EMAIL})",
+    "User-Agent": f"Mozilla/5.0 (compatible; JobSearchBot/1.3; +{NOMINATIM_EMAIL})",
     "Accept-Language": "fr-FR,fr;q=0.9"
 }
 PROXIES = {"http": PROXY, "https": PROXY} if PROXY else None
 
-# -------- Geocoding helpers --------
+# -------- HTTP session with retries --------
+SESSION = requests.Session()
+SESSION.headers.update(HEADERS)
+retry = Retry(total=3, backoff_factor=0.6, status_forcelist=[429, 500, 502, 503, 504])
+adapter = HTTPAdapter(max_retries=retry)
+SESSION.mount("http://", adapter)
+SESSION.mount("https://", adapter)
+
+def safe_get(url: str, params: Optional[Dict[str, Any]] = None) -> requests.Response:
+    r = SESSION.get(url, params=params, proxies=PROXIES, timeout=25)
+    r.raise_for_status()
+    return r
+
+# -------- Geocoding helpers (with cache) --------
 def geocoder():
     geolocator = Nominatim(user_agent=f"jobsearch-bot-{NOMINATIM_EMAIL}")
     return geolocator, RateLimiter(geolocator.geocode, min_delay_seconds=1, swallow_exceptions=True)
+
+GEOCODE_CACHE: Dict[str, Tuple[float, float]] = {}
+
+def geocode(text: Optional[str], geo, rate) -> Optional[Tuple[float, float]]:
+    if not text:
+        return None
+    key = text.strip().lower()
+    if key in GEOCODE_CACHE:
+        return GEOCODE_CACHE[key]
+    try:
+        loc = rate(text + ", France")
+        if loc:
+            coords = (loc.latitude, loc.longitude)
+            GEOCODE_CACHE[key] = coords
+            return coords
+    except Exception:
+        return None
+    return None
 
 def haversine_km(lat1, lon1, lat2, lon2):
     R = 6371.0
@@ -47,18 +86,7 @@ def haversine_km(lat1, lon1, lat2, lon2):
     a = math.sin(dphi/2)**2 + math.cos(phi1)*math.cos(phi2)*math.sin(dlambda/2)**2
     return 2*R*math.asin(math.sqrt(a))
 
-def geocode(text, geo, rate):
-    if not text:
-        return None
-    try:
-        loc = rate(text + ", France")
-        if loc:
-            return (loc.latitude, loc.longitude)
-    except Exception:
-        return None
-    return None
-
-# -------- Filters --------
+# -------- Filters & parsing --------
 HOUSING_KEYS = [
     "logé", "loge", "logement fourni", "logement inclus", "logement possible",
     "nourri", "logé nourri", "loge nourri", "hébergement fourni", "hébergement", "logement sur place"
@@ -74,7 +102,7 @@ def matches_housing(text: str) -> bool:
 
 def matches_sectors(text: str) -> bool:
     t = text.lower()
-    keys = []
+    keys: List[str] = []
     if "hotellerie-restauration" in SECTORS:
         keys += SECTOR_KEYS["hotellerie-restauration"]
     if "agri-vendanges" in SECTORS:
@@ -86,12 +114,6 @@ def looks_recent(text: str) -> bool:
     today = datetime.now().strftime("%d/%m/%Y")
     hints = ["aujourd’hui", "aujourd'hui", "today", "il y a ", "nouvelle offre", today]
     return any(h in t for h in hints)
-
-# -------- HTTP helpers --------
-def safe_get(url, params=None):
-    r = requests.get(url, params=params, headers=HEADERS, proxies=PROXIES, timeout=25)
-    r.raise_for_status()
-    return r
 
 def pick_city_from_text(text: str) -> str:
     m = re.search(r"([A-ZÉÈÎÏÔÂÇa-zÀ-ÿ' -]+)\s*\((\d{2,3})\)", text)
@@ -115,29 +137,32 @@ def extract_contacts_from_html(html: str) -> Tuple[Optional[str], Optional[str]]
     phone = None
     email = None
     soup = BeautifulSoup(html, "lxml")
-    # mailto / tel
     a_mail = soup.select_one("a[href^='mailto:']")
     if a_mail:
         mail_href = a_mail.get("href", "")
         m = re.search(EMAIL_RE, mail_href)
-        if m: email = m.group(0)
+        if m:
+            email = m.group(0)
     a_tel = soup.select_one("a[href^='tel:']")
     if a_tel:
         tel_href = a_tel.get("href", "")
         m = re.search(PHONE_RE, tel_href)
-        if m: phone = normalize_phone(m.group(0))
-    # regex fallback global
+        if m:
+            phone = normalize_phone(m.group(0))
     if not email:
         m = EMAIL_RE.search(html)
-        if m: email = m.group(0)
+        if m:
+            email = m.group(0)
     if not phone:
         m = PHONE_RE.search(html)
-        if m: phone = normalize_phone(m.group(0))
+        if m:
+            phone = normalize_phone(m.group(0))
     return phone, email
 
 def fetch_contact_details(url: str) -> Tuple[Optional[str], Optional[str]]:
     try:
-        if not url or not url.startswith("http"): return None, None
+        if not url or not url.startswith("http"):
+            return None, None
         r = safe_get(url)
         phone, email = extract_contacts_from_html(r.text)
         time.sleep(0.5)
@@ -194,6 +219,18 @@ def fallback_contacts(employer: str, city: str) -> Tuple[Optional[str], Optional
     phone = pj_phone_lookup(employer, city) or ae_phone_lookup(employer, city)
     return phone, None  # email rarement disponible dans ces annuaires
 
+# -------- Utility: fetch page detail text --------
+def fetch_page_text(url: str) -> str:
+    try:
+        if not url or not url.startswith("http"):
+            return ""
+        r = safe_get(url)
+        soup = BeautifulSoup(r.text, "lxml")
+        return soup.get_text(" ", strip=True)
+    except Exception as e:
+        print(f"[INFO] fetch_page_text failed for {url}: {e}")
+        return ""
+
 # -------- Providers --------
 def fetch_france_travail() -> List[Dict[str, Any]]:
     url = "https://candidat.francetravail.fr/offres/recherche"
@@ -221,7 +258,7 @@ def fetch_indeed() -> List[Dict[str, Any]]:
     params = {
         "q": "saisonnier (logé OR logement OR loge) (serveur OR serveuse OR vendange OR cueillette OR plonge)",
         "l": "Clermont-Ferrand (63)",
-        "radius": "150"
+        "radius": "200"  # élargi (optionnel) pour ramener plus de cartes
     }
     r = safe_get(url, params)
     soup = BeautifulSoup(r.text, "lxml")
@@ -269,7 +306,8 @@ def fetch_saisonnier_fr() -> List[Dict[str, Any]]:
     r = safe_get(url)
     soup = BeautifulSoup(r.text, "lxml")
     offers = []
-    for card in soup.select("article, .job-card, li"):
+    # sélecteur élargi (optionnel)
+    for card in soup.select("article, .job-card, li, .job, .search-item"):
         title_el = card.select_one("a")
         if not title_el:
             continue
@@ -419,10 +457,14 @@ def collect_offers() -> List[Dict[str, Any]]:
     items: List[Dict[str, Any]] = []
     for provider in PROVIDERS:
         try:
-            items += provider()
-            time.sleep(1.2)
+            before = len(items)
+            batch = provider()
+            items += batch
+            print(f"[PROVIDER] {provider.__name__}: {len(batch)} offres")
+            time.sleep(1.2)  # politesse anti-bot
         except Exception as e:
             print(f"[WARN] Provider {provider.__name__} failed: {e}")
+    print(f"[INFO] Total offres collectées (brut): {len(items)}")
     return items
 
 def enrich_and_filter(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -431,67 +473,91 @@ def enrich_and_filter(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     if not origin:
         raise RuntimeError("Impossible de géocoder la ville d'origine.")
 
-    enriched = []
+    enriched: List[Dict[str, Any]] = []
     seen_links = set()
+
     for it in items:
         link = it.get("link") or ""
         if not link or link in seen_links:
             continue
         seen_links.add(link)
 
-        text = " ".join([it.get("title",""), it.get("employer",""), it.get("city",""), it.get("raw","")])
+        # Texte "listing"
+        text_preview = " ".join([it.get("title",""), it.get("employer",""), it.get("city",""), it.get("raw","")]).strip()
+        title = it.get("title","")
+        employer = it.get("employer","")
+        city = it.get("city","") or pick_city_from_text(text_preview)
 
-        # --- Correctif demandé: exclure toute offre mentionnant "Permis"
-        if "permis" in text.lower():
+        # — Exclure toutes les offres mentionnant 'Permis'
+        if "permis" in text_preview.lower():
             continue
 
-        # Filtres essentiels
-        if HOUSING_REQUIRED and not matches_housing(text):
-            continue
-        if not matches_sectors(text):
-            continue
+        # — Secteurs : si l'aperçu ne matche pas, on tente le détail une seule fois
+        if not matches_sectors(text_preview):
+            detail_text = fetch_page_text(link)
+            if not detail_text or not matches_sectors(detail_text):
+                continue
+        else:
+            detail_text = ""  # on charge la page détail seulement si nécessaire
+
+        # — Logement requis : si pas détecté dans l'aperçu, on vérifie le détail
+        if HOUSING_REQUIRED and not matches_housing(text_preview):
+            if not detail_text:
+                detail_text = fetch_page_text(link)
+            if not detail_text or not matches_housing(detail_text):
+                continue  # toujours pas de mention de logement -> on écarte
+
+        # Améliorer employer/ville depuis le détail si possible
+        if detail_text:
+            if not employer:
+                m_emp = re.search(r"(?:Société|Entreprise|Employeur)\s*[:\-]\s*([^\n|]+)", detail_text, re.I)
+                if m_emp:
+                    employer = m_emp.group(1).strip()
+            if not city:
+                c2 = pick_city_from_text(detail_text)
+                if c2:
+                    city = c2
 
         # Distance
-        coords = geocode(it.get("city") or pick_city_from_text(text), geo, rate)
+        coords = geocode(city or pick_city_from_text(text_preview), geo, rate)
         dist_km = 99999
         if coords and origin:
             dist_km = round(haversine_km(origin[0], origin[1], coords[0], coords[1]))
 
-        # Contacts (best-effort)
+        # Contacts (après détail)
         phone, email = fetch_contact_details(link)
-        if not phone and FALLBACK_CONTACTS and it.get("employer"):
-            fb_phone, _ = fallback_contacts(it.get("employer",""), it.get("city",""))
+        if not phone and FALLBACK_CONTACTS and employer:
+            fb_phone, _ = fallback_contacts(employer, city)
             if fb_phone:
                 phone = fb_phone
 
         enriched.append({
-            "title": it.get("title",""),
-            "employer": it.get("employer",""),
-            "city": it.get("city","") or pick_city_from_text(text),
+            "title": title,
+            "employer": employer,
+            "city": city,
             "distance_km": dist_km,
             "link": link,
             "phone": phone,
             "email": email,
-            "raw": it.get("raw",""),
-            "recent_bias": -1 if looks_recent(text) else 0
+            "raw": (text_preview + " " + (detail_text or "")).strip(),
+            "recent_bias": -1 if looks_recent(text_preview or detail_text) else 0
         })
 
     # Tri: récence (si détectée) puis distance
     enriched.sort(key=lambda x: (x["recent_bias"], x["distance_km"]))
 
-    # --- Correctif "Minimum 30" : on NE COUPE PLUS à 30.
-    #     On logge juste si < 30 pour indiquer un volume faible ce jour-là.
+    # Minimum 30 : on NE coupe plus. On log juste si < 30.
     if len(enriched) < MAX_RESULTS:
         print(f"[INFO] Seulement {len(enriched)} offres trouvées après filtrage (seuil min {MAX_RESULTS}).")
 
-    return enriched  # on renvoie toutes les offres filtrées (≥30 si dispo)
+    return enriched  # peut être >= 30 si disponibles
 
 def make_email(offres: List[Dict[str, Any]]) -> tuple[str, str, str]:
     today = datetime.now().strftime("%d/%m/%Y")
-    subject = f"Offres saisonnières - Clermont-Ferrand - {today}"
+    subject = f"[{len(offres)}] Offres saisonnières - Clermont-Ferrand - {today}"
 
-    lines_txt = []
-    rows_html = []
+    lines_txt: List[str] = []
+    rows_html: List[str] = []
     for i, o in enumerate(offres, 1):
         dist = f"{o['distance_km']} km" if o["distance_km"] != 99999 else "—"
         contact_txt = []
@@ -533,7 +599,7 @@ def make_email(offres: List[Dict[str, Any]]) -> tuple[str, str, str]:
 <html>
   <body>
     <h2>Offres saisonnières (logement requis) — Départ: {ORIGIN_CITY}</h2>
-    <p>Secteurs: {', '.join(SECTORS)} — Seuil minimum visé: {MAX_RESULTS} offres — Fallback contacts: {"ON" if FALLBACK_CONTACTS else "OFF"}</p>
+    <p>Sources: France Travail, Indeed, Vitijob, Saisonnier.fr, LHR, Jobagri, Adecco, Manpower, Randstad — Seuil min: {MAX_RESULTS} — Fallback contacts: {"ON" if FALLBACK_CONTACTS else "OFF"}</p>
     <table style="border-collapse:collapse; width:100%; border:1px solid #ddd;">
       <thead>
         <tr style="background:#f5f5f5;">
