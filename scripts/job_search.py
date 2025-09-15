@@ -1,5 +1,6 @@
-# scripts/job_search.py — v1.8
-# Priorisation sans permis (accepte Permis B), dédup avancée, filtres v1.7 conservés
+# scripts/job_search.py — v1.9 (API-first: France Travail + Adzuna + Jooble; HTML fallback)
+# Règles: logement requis, pas de formation obligatoire, exp <= 1 an, ciblage métier,
+# accepter "Permis B" mais prioriser sans permis, dédup avancée, tri récence -> sans permis -> distance
 
 import os
 import smtplib
@@ -8,6 +9,7 @@ import math
 import time
 import re
 import random
+import json
 import urllib.parse
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
@@ -21,14 +23,12 @@ from geopy.extra.rate_limiter import RateLimiter
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
-# -------- Config from env --------
+# -------------------- Config --------------------
 ORIGIN_CITY = os.getenv("ORIGIN_CITY", "Clermont-Ferrand, France")
 MAX_RESULTS = int(os.getenv("MAX_RESULTS", "30"))  # seuil minimum visé (on ne tronque pas)
 HOUSING_REQUIRED = os.getenv("HOUSING_REQUIRED", "true").lower() == "true"
 FALLBACK_CONTACTS = os.getenv("FALLBACK_CONTACTS", "true").lower() == "true"
-
-# Mode France entière (facultatif)
-FRANCE_WIDE = os.getenv("FRANCE_WIDE", "false").lower() == "true"
+FRANCE_WIDE = os.getenv("FRANCE_WIDE", "true").lower() == "true"  # API-first: par défaut France entière
 
 SMTP_HOST = os.getenv("SMTP_HOST")
 SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
@@ -40,6 +40,17 @@ RECIPIENTS = [e.strip() for e in os.getenv("RECIPIENTS", "").split(",") if e.str
 NOMINATIM_EMAIL = os.getenv("NOMINATIM_EMAIL", "example@example.com")
 PROXY = os.getenv("PROXY")  # optionnel
 
+# APIs — secrets
+FT_CLIENT_ID = os.getenv("FT_CLIENT_ID")
+FT_CLIENT_SECRET = os.getenv("FT_CLIENT_SECRET")
+FT_TOKEN_URL = os.getenv("FT_TOKEN_URL", "https://entreprise.francetravail.fr/connexion/oauth2/access_token?realm=/partenaire")
+FT_API_URL = os.getenv("FT_API_URL", "https://api.francetravail.io/partenaire/offresdemploi/v2/offres/search")  # v2 search
+
+ADZUNA_APP_ID = os.getenv("ADZUNA_APP_ID")
+ADZUNA_APP_KEY = os.getenv("ADZUNA_APP_KEY")
+
+JOOBLE_API_KEY = os.getenv("JOOBLE_API_KEY")
+
 UA_POOL = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 13_5) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15",
@@ -49,21 +60,21 @@ UA_POOL = [
 BASE_HEADERS = {"Accept-Language": "fr-FR,fr;q=0.9", "Cache-Control": "no-cache"}
 DOMAIN_REFERERS = {
     "francetravail.fr": "https://candidat.francetravail.fr/offres/recherche",
+    "api.francetravail.io": "https://api.gouv.fr/",
+    "adzuna.com": "https://developer.adzuna.com/overview",
+    "jooble.org": "https://jooble.org/",
     "indeed.com": "https://fr.indeed.com/",
-    "indeed.fr": "https://fr.indeed.com/",
     "vitijob.com": "https://www.vitijob.com/",
     "saisonnier.fr": "https://www.saisonnier.fr/",
     "lhotellerie-restauration.fr": "https://www.lhotellerie-restauration.fr/emploi/",
     "jobagri.com": "https://www.jobagri.com/offres",
     "adecco.fr": "https://www.adecco.fr/",
     "manpower.fr": "https://www.manpower.fr/Offres",
-    "randstad.fr": "https://www.randstad.fr/offres/",
-    "meteojob.com": "https://www.meteojob.com/",
-    "hellowork.com": "https://www.hellowork.com/"
+    "randstad.fr": "https://www.randstad.fr/offres/"
 }
 def _headers_for(url: str) -> dict:
     h = dict(BASE_HEADERS)
-    h["User-Agent"] = random.choice(IA_POOL) if (IA_POOL := UA_POOL) else UA_POOL[0]
+    h["User-Agent"] = random.choice(UA_POOL)
     try:
         host = urllib.parse.urlparse(url).hostname or ""
     except Exception:
@@ -76,20 +87,28 @@ def _headers_for(url: str) -> dict:
 
 PROXIES = {"http": PROXY, "https": PROXY} if PROXY else None
 
-# -------- HTTP session with retries --------
+# -------------------- HTTP Session --------------------
 SESSION = requests.Session()
 retry = Retry(total=3, backoff_factor=0.6, status_forcelist=[429, 500, 502, 503, 504])
 adapter = HTTPAdapter(max_retries=retry)
 SESSION.mount("http://", adapter)
 SESSION.mount("https://", adapter)
 
-def safe_get(url: str, params: Optional[Dict[str, Any]] = None) -> requests.Response:
+def safe_get(url: str, params: Optional[Dict[str, Any]] = None, headers: Optional[dict] = None) -> requests.Response:
     hdrs = _headers_for(url)
+    if headers: hdrs.update(headers)
     r = SESSION.get(url, params=params, headers=hdrs, proxies=PROXIES, timeout=25)
     r.raise_for_status()
     return r
 
-# -------- Geocoding (with cache) --------
+def safe_post(url: str, data=None, json_data=None, headers: Optional[dict] = None) -> requests.Response:
+    hdrs = _headers_for(url)
+    if headers: hdrs.update(headers)
+    r = SESSION.post(url, data=data, json=json_data, headers=hdrs, proxies=PROXIES, timeout=25)
+    r.raise_for_status()
+    return r
+
+# -------------------- Geocoding --------------------
 def geocoder():
     geolocator = Nominatim(user_agent=f"jobsearch-bot-{NOMINATIM_EMAIL}")
     return geolocator, RateLimiter(geolocator.geocode, min_delay_seconds=1, swallow_exceptions=True)
@@ -119,7 +138,7 @@ def haversine_km(lat1, lon1, lat2, lon2):
     a = math.sin(dphi/2)**2 + math.cos(phi1)*math.cos(phi2)*math.sin(dlambda/2)**2
     return 2*R*math.asin(math.sqrt(a))
 
-# -------- Métier ciblé (préférences) --------
+# -------------------- Métier ciblé --------------------
 SERVICE_BAR_POLY = [
     "serveur", "serveuse", "chef de rang", "runner",
     "bar", "barman", "barmaid",
@@ -155,7 +174,7 @@ CLEANING_SOFT = [
 ]
 PLONGE_SOFT = ["plonge", "plongeur", "plongeuse"]
 
-def _has_any(text: str, words: list[str]) -> bool:
+def _has_any(text: str, words: List[str]) -> bool:
     t = text.lower()
     return any(w in t for w in words)
 
@@ -180,7 +199,7 @@ def role_allowed(text: str) -> bool:
     allow_hit = _has_any(t, SERVICE_BAR_POLY) or _has_any(t, VENTE_OBJETS) or _has_any(t, RAYON_MERCH)
     return allow_hit
 
-# -------- Autres filtres (logement, formation, expérience) --------
+# -------------------- Autres filtres --------------------
 HOUSING_KEYS = [
     "logé", "loge", "logement fourni", "logement inclus", "logement possible",
     "nourri", "logé nourri", "loge nourri", "hébergement fourni", "hébergement", "logement sur place"
@@ -242,12 +261,11 @@ def pick_city_from_text(text: str) -> str:
         return m2.group(1).strip()
     return ""
 
-# ---- Permis : on NE filtre plus -> on marque un indicateur pour le tri
 def mentions_permit(text: str) -> bool:
     t = text.lower()
-    return "permi" in t  # capture 'permis', 'permis b', etc.
+    return "permi" in t  # captures 'permis', 'permis b', etc.
 
-# -------- URL helpers --------
+# -------------------- URL helpers --------------------
 URL_EXTRACT_RE = re.compile(r"(https?://[^\s'\"<>)]+)", re.I)
 def is_http_url(u: Optional[str]) -> bool:
     return bool(u) and (u.startswith("http://") or u.startswith("https://"))
@@ -286,7 +304,7 @@ def extract_best_link(elem: BeautifulSoup, base: str) -> str:
             return url
     return ""
 
-# -------- Contacts --------
+# -------------------- Contacts --------------------
 EMAIL_RE = re.compile(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", re.I)
 PHONE_RE = re.compile(r"(?:(?:\+33\s?|0)(?:\s|\.|-)?)?[1-9](?:[\s\.\-]?\d{2}){4}")
 def normalize_phone(s: str) -> str:
@@ -323,7 +341,7 @@ def fetch_contact_details(url: str) -> Tuple[Optional[str], Optional[str]]:
         print(f"[INFO] No direct contacts extracted from {url}: {e}")
         return None, None
 
-# -------- Fallback annuaires --------
+# -------------------- Fallback annuaires --------------------
 def pj_phone_lookup(employer: str, city_hint: str) -> Optional[str]:
     if not employer: return None
     q = f"{employer} {city_hint}".strip()
@@ -363,7 +381,7 @@ def fallback_contacts(employer: str, city: str) -> Tuple[Optional[str], Optional
     phone = pj_phone_lookup(employer, city) or ae_phone_lookup(employer, city)
     return phone, None
 
-# -------- Fetch page text --------
+# -------------------- Fetch page text (HTML) --------------------
 def fetch_page_text(url: str) -> str:
     try:
         if not is_http_url(url): return ""
@@ -374,271 +392,293 @@ def fetch_page_text(url: str) -> str:
         print(f"[INFO] fetch_page_text failed for {url}: {e}")
         return ""
 
-# -------- Providers (HTML) --------
-def fetch_france_travail() -> List[Dict[str, Any]]:
+# ===============================================================
+#                       PROVIDERS — API
+# ===============================================================
+
+# ---- France Travail API ----
+def fetch_france_travail_api() -> List[Dict[str, Any]]:
+    if not (FT_CLIENT_ID and FT_CLIENT_SECRET):
+        return []
+    offers: List[Dict[str, Any]] = []
+    try:
+        # OAuth2 client_credentials
+        data = {
+            "grant_type": "client_credentials",
+            "client_id": FT_CLIENT_ID,
+            "client_secret": FT_CLIENT_SECRET,
+            # scope: la v2 n'exige généralement pas si configurée côté compte; on garde générique
+        }
+        tok = safe_post(FT_TOKEN_URL, data=data, headers={"Content-Type": "application/x-www-form-urlencoded"})
+        access_token = tok.json().get("access_token")
+        if not access_token:
+            print("[WARN] FT API: no access_token")
+            return []
+
+        params = {}
+        # recherche mots clés France entière
+        params["motsCles"] = "saisonnier logé nourri OR logement fourni OR logé"
+        # Filtre domaine? on garde large; on filtre côté code ensuite.
+        # Taille page: la v2 autorise 'range' ou 'page' selon version; on pagine simple
+        params["page"] = 1
+        params["per_page"] = 100
+
+        headers = {"Authorization": f"Bearer {access_token}"}
+        r = safe_get(FT_API_URL, params=params, headers=headers)
+        data_json = r.json()
+
+        items = data_json.get("resultats") or data_json.get("offres") or []
+        for it in items:
+            title = it.get("intitule") or it.get("titre") or "Offre"
+            employeur = (it.get("entreprise") or {}).get("nom") or ""
+            lieu = (it.get("lieuTravail") or {}).get("libelle") or it.get("lieuTravail") or ""
+            lien = it.get("origineOffre", {}).get("urlOrigine") or it.get("url") or ""
+            desc = it.get("description") or ""
+
+            offers.append({
+                "title": title,
+                "employer": employeur,
+                "city": lieu,
+                "link": lien,
+                "raw": " ".join([title, employeur, lieu, desc])
+            })
+    except Exception as e:
+        print(f"[WARN] France Travail API failed: {e}")
+    return offers
+
+# ---- Adzuna API ----
+def fetch_adzuna_api() -> List[Dict[str, Any]]:
+    if not (ADZUNA_APP_ID and ADZUNA_APP_KEY):
+        return []
+    offers: List[Dict[str, Any]] = []
+    try:
+        base = "https://api.adzuna.com/v1/api/jobs/fr/search/1"
+        query = "saisonnier (logé OR logement OR loge) (serveur OR serveuse OR barman OR polyvalent OR vendange OR cueillette OR plonge)"
+        params = {
+            "app_id": ADZUNA_APP_ID,
+            "app_key": ADZUNA_APP_KEY,
+            "what": query,
+            "results_per_page": 50,  # première page large
+            "content-type": "application/json"
+        }
+        r = safe_get(base, params=params)
+        js = r.json()
+        for res in js.get("results", []):
+            title = res.get("title") or "Offre"
+            company = (res.get("company") or {}).get("display_name") or ""
+            location = (res.get("location") or {}).get("display_name") or ""
+            url = res.get("redirect_url") or res.get("adref") or ""
+            desc = (res.get("description") or "") + " " + (res.get("category", {}).get("label", "") or "")
+            offers.append({
+                "title": title,
+                "employer": company,
+                "city": location,
+                "link": url,
+                "raw": " ".join([title, company, location, desc])
+            })
+    except Exception as e:
+        print(f"[WARN] Adzuna API failed: {e}")
+    return offers
+
+# ---- Jooble API ----
+def fetch_jooble_api() -> List[Dict[str, Any]]:
+    if not JOOBLE_API_KEY:
+        return []
+    offers: List[Dict[str, Any]] = []
+    try:
+        url = f"https://jooble.org/api/{JOOBLE_API_KEY}"
+        body = {
+            "keywords": "saisonnier logé OR logement OR loge OR hébergement (serveur OR serveuse OR barman OR polyvalent OR vendange OR cueillette OR plonge)",
+            # pas de 'location' => France entière
+            "page": 1
+        }
+        r = safe_post(url, json_data=body, headers={"Content-Type": "application/json"})
+        js = r.json()
+        for res in js.get("jobs", []):
+            title = res.get("title") or "Offre"
+            company = res.get("company") or ""
+            location = res.get("location") or ""
+            link = res.get("link") or ""
+            desc = res.get("snippet") or res.get("description") or ""
+            offers.append({
+                "title": title,
+                "employer": company,
+                "city": location,
+                "link": link,
+                "raw": " ".join([title, company, location, desc])
+            })
+    except Exception as e:
+        print(f"[WARN] Jooble API failed: {e}")
+    return offers
+
+# ===============================================================
+#                   PROVIDERS — HTML fallback
+# ===============================================================
+def fetch_france_travail_html() -> List[Dict[str, Any]]:
     base = "https://candidat.francetravail.fr"
     url = base + "/offres/recherche"
     params = {"motsCles": "saisonnier logé nourri"} if FRANCE_WIDE else \
              {"motsCles": "saisonnier logé nourri", "lieu": "Clermont-Ferrand (63)", "rayon": "200"}
-    r = safe_get(url, params)
-    soup = BeautifulSoup(r.text, "lxml")
-    offers = []
-    for card in soup.select("[data-id-offre]"):
-        title = card.select_one("h3")
-        employer = card.select_one(".t4.color-dark-blue")
-        city = card.select_one(".subtext")
-        raw_link = card.get("data-href") or (card.find("a", href=True).get("href", "") if card.find("a", href=True) else "")
-        link = sanitize_link(base, raw_link)
-        desc = card.get_text(" ", strip=True)
-        offers.append({
-            "title": title.get_text(strip=True) if title else "Offre",
-            "employer": employer.get_text(strip=True) if employer else "",
-            "city": (city.get_text(strip=True) if city else "") or pick_city_from_text(desc),
-            "link": link,
-            "raw": desc
-        })
-    return offers
-
-def fetch_indeed() -> List[Dict[str, Any]]:
-    base = "https://fr.indeed.com"
-    url = base + "/jobs"
-    params = {"q": "saisonnier (logé OR logement OR loge) (serveur OR serveuse OR vendange OR cueillette OR plonge)"} \
-        if FRANCE_WIDE else \
-        {"q": "saisonnier (logé OR logement OR loge) (serveur OR serveuse OR vendange OR cueillette OR plonge)",
-         "l": "Clermont-Ferrand (63)", "radius": "200"}
-    r = safe_get(url, params)
-    soup = BeautifulSoup(r.text, "lxml")
-    offers = []
-    for card in soup.select("div.job_seen_beacon"):
-        title_el = card.select_one("h2 a")
-        title = title_el.get_text(strip=True) if title_el else "Offre Indeed"
-        raw_link = title_el.get("href", "") if title_el else ""
-        link = sanitize_link(base, raw_link)
-        company = card.select_one("span.companyName")
-        city = card.select_one("div.companyLocation")
-        desc = card.get_text(" ", strip=True)
-        offers.append({
-            "title": title,
-            "employer": company.get_text(strip=True) if company else "",
-            "city": (city.get_text(strip=True) if city else "") or pick_city_from_text(desc),
-            "link": link,
-            "raw": desc
-        })
-    return offers
-
-def fetch_vitijob() -> List[Dict[str, Any]]:
-    base = "https://www.vitijob.com"
-    url = base + "/fr/recherche"
-    params = {"q": "vendanges logé"} if FRANCE_WIDE else {"q": "vendanges logé", "l": "Auvergne"}
-    r = safe_get(url, params)
-    soup = BeautifulSoup(r.text, "lxml")
-    offers = []
-    for card in soup.select(".job-offer-card, .search-item, article"):
-        title_el = card.select_one("a")
-        title = title_el.get_text(strip=True) if title_el else "Offre Vitijob"
-        raw_link = title_el.get("href", "") if title_el else ""
-        link = sanitize_link(base, raw_link)
-        employer = card.select_one(".company, .entreprise, .company-name")
-        city = card.select_one(".location, .lieu")
-        desc = card.get_text(" ", strip=True)
-        offers.append({
-            "title": title,
-            "employer": employer.get_text(strip=True) if employer else "",
-            "city": (city.get_text(strip=True) if city else "") or pick_city_from_text(desc),
-            "link": link,
-            "raw": desc
-        })
-    return offers
+    try:
+        r = safe_get(url, params)
+        soup = BeautifulSoup(r.text, "lxml")
+        offers = []
+        for card in soup.select("[data-id-offre]"):
+            title = card.select_one("h3")
+            employer = card.select_one(".t4.color-dark-blue")
+            city = card.select_one(".subtext")
+            raw_link = card.get("data-href") or (card.find("a", href=True).get("href", "") if card.find("a", href=True) else "")
+            link = sanitize_link(base, raw_link)
+            desc = card.get_text(" ", strip=True)
+            offers.append({
+                "title": title.get_text(strip=True) if title else "Offre",
+                "employer": employer.get_text(strip=True) if employer else "",
+                "city": (city.get_text(strip=True) if city else "") or pick_city_from_text(desc),
+                "link": link,
+                "raw": desc
+            })
+        return offers
+    except Exception as e:
+        print(f"[WARN] FT HTML failed: {e}")
+        return []
 
 def fetch_saisonnier_fr() -> List[Dict[str, Any]]:
     base = "https://www.saisonnier.fr"
     url = base + "/emplois"
-    r = safe_get(url)
-    soup = BeautifulSoup(r.text, "lxml")
-    offers = []
-    for card in soup.select("article, .job-card, li, .job, .search-item"):
-        title_el = card.select_one("a")
-        if not title_el: continue
-        title = title_el.get_text(strip=True)
-        raw_link = title_el.get("href", "")
-        link = sanitize_link(base, raw_link)
-        meta = card.get_text(" ", strip=True)
-        city = ""
-        loc = card.select_one(".job-location, .location, .lieu")
-        if loc: city = loc.get_text(strip=True)
-        offers.append({
-            "title": title or "Offre Saisonnier.fr",
-            "employer": "",
-            "city": city or pick_city_from_text(meta),
-            "link": link,
-            "raw": meta
-        })
-    return offers
+    try:
+        r = safe_get(url)
+        soup = BeautifulSoup(r.text, "lxml")
+        offers = []
+        for card in soup.select("article, .job-card, li, .job, .search-item"):
+            title_el = card.select_one("a")
+            if not title_el: continue
+            title = title_el.get_text(strip=True)
+            raw_link = title_el.get("href", "")
+            link = sanitize_link(base, raw_link)
+            meta = card.get_text(" ", strip=True)
+            city = ""
+            loc = card.select_one(".job-location, .location, .lieu")
+            if loc: city = loc.get_text(strip=True)
+            offers.append({
+                "title": title or "Offre Saisonnier.fr",
+                "employer": "",
+                "city": city or pick_city_from_text(meta),
+                "link": link,
+                "raw": meta
+            })
+        return offers
+    except Exception as e:
+        print(f"[WARN] Saisonnier.fr failed: {e}")
+        return []
 
 def fetch_lhotellerie() -> List[Dict[str, Any]]:
     base = "https://www.lhotellerie-restauration.fr"
     url = base + "/emploi/"
-    r = safe_get(url)
-    soup = BeautifulSoup(r.text, "lxml")
-    offers = []
-    for card in soup.select("article, .offre, .annonce"):
-        title_el = card.select_one("a")
-        if not title_el: continue
-        title = title_el.get_text(strip=True)
-        raw_link = title_el.get("href", "")
-        link = sanitize_link(base, raw_link)
-        desc = card.get_text(" ", strip=True)
-        city = pick_city_from_text(desc)
-        offers.append({
-            "title": title or "Offre Hôtellerie-Restauration",
-            "employer": "",
-            "city": city,
-            "link": link,
-            "raw": desc
-        })
-    return offers
+    try:
+        r = safe_get(url)
+        soup = BeautifulSoup(r.text, "lxml")
+        offers = []
+        for card in soup.select("article, .offre, .annonce"):
+            title_el = card.select_one("a")
+            if not title_el: continue
+            title = title_el.get_text(strip=True)
+            raw_link = title_el.get("href", "")
+            link = sanitize_link(base, raw_link)
+            desc = card.get_text(" ", strip=True)
+            city = pick_city_from_text(desc)
+            offers.append({
+                "title": title or "Offre Hôtellerie-Restauration",
+                "employer": "",
+                "city": city,
+                "link": link,
+                "raw": desc
+            })
+        return offers
+    except Exception as e:
+        print(f"[WARN] LHR failed: {e}")
+        return []
 
 def fetch_anefa_jobsagri() -> List[Dict[str, Any]]:
     base = "https://www.jobagri.com"
     url = base + "/offres"
-    r = safe_get(url)
-    soup = BeautifulSoup(r.text, "lxml")
-    offers = []
-    for card in soup.select("article, .job, .offre"):
-        title_el = card.select_one("a")
-        if not title_el: continue
-        title = title_el.get_text(strip=True)
-        raw_link = title_el.get("href", "")
-        link = sanitize_link(base, raw_link)
-        desc = card.get_text(" ", strip=True)
-        city = pick_city_from_text(desc)
-        offers.append({
-            "title": title or "Offre agricole",
-            "employer": "",
-            "city": city,
-            "link": link,
-            "raw": desc
-        })
-    return offers
+    try:
+        r = safe_get(url)
+        soup = BeautifulSoup(r.text, "lxml")
+        offers = []
+        for card in soup.select("article, .job, .offre"):
+            title_el = card.select_one("a")
+            if not title_el: continue
+            title = title_el.get_text(strip=True)
+            raw_link = title_el.get("href", "")
+            link = sanitize_link(base, raw_link)
+            desc = card.get_text(" ", strip=True)
+            city = pick_city_from_text(desc)
+            offers.append({
+                "title": title or "Offre agricole",
+                "employer": "",
+                "city": city,
+                "link": link,
+                "raw": desc
+            })
+        return offers
+    except Exception as e:
+        print(f"[WARN] Jobagri failed: {e}")
+        return []
 
 def fetch_adecco() -> List[Dict[str, Any]]:
     base = "https://www.adecco.fr"
     url = base + "/resultats-offres-emploi/"
     params = {"k": "saisonnier logé"} if FRANCE_WIDE else {"k": "saisonnier logé", "l": "Clermont-Ferrand"}
-    r = safe_get(url, params)
-    soup = BeautifulSoup(r.text, "lxml")
-    offers = []
-    cards = soup.select("article, .result-item, li, .job-tile, .offer-card") or soup.select("article, .result-item, li")
-    for card in cards:
-        a = card.select_one("a")
-        title = a.get_text(strip=True) if a else (card.get_text(" ", strip=True)[:60] or "Offre Adecco")
-        link = extract_best_link(card, base)
-        if not link and a: link = sanitize_link(base, a.get("href", ""))
-        if not is_http_url(link): continue
-        desc = card.get_text(" ", strip=True)
-        city = pick_city_from_text(desc)
-        offers.append({
-            "title": title or "Offre Adecco",
-            "employer": "Adecco",
-            "city": city,
-            "link": link,
-            "raw": desc
-        })
-    return offers
-
-def fetch_manpower() -> List[Dict[str, Any]]:
-    base = "https://www.manpower.fr"
-    url = base + "/Offres"
-    params = {"Keywords": "saisonnier logement"} if FRANCE_WIDE else {"Keywords": "saisonnier logement", "Location": "Clermont-Ferrand"}
-    r = safe_get(url, params)
-    soup = BeautifulSoup(r.text, "lxml")
-    offers = []
-    for card in soup.select("article, .search-result, li"):
-        a = card.select_one("a")
-        title = a.get_text(strip=True) if a else "Offre Manpower"
-        raw_link = (a.get("href", "") if a else "") or card.get("data-href") or card.get("data-url")
-        link = sanitize_link(base, raw_link)
-        if not is_http_url(link): continue
-        desc = card.get_text(" ", strip=True)
-        city = pick_city_from_text(desc)
-        offers.append({
-            "title": title,
-            "employer": "Manpower",
-            "city": city,
-            "link": link,
-            "raw": desc
-        })
-    return offers
-
-def fetch_randstad() -> List[Dict[str, Any]]:
-    base = "https://www.randstad.fr"
-    # Essai 1
     try:
-        url = base + "/recherche/resultats"
-        params = {"k": "saisonnier logement"} if FRANCE_WIDE else {"k": "saisonnier logement", "l": "Clermont-Ferrand"}
         r = safe_get(url, params)
         soup = BeautifulSoup(r.text, "lxml")
         offers = []
-        cards = soup.select("article, .search__result, .result-list__item, li")
+        cards = soup.select("article, .result-item, li, .job-tile, .offer-card") or soup.select("article, .result-item, li")
         for card in cards:
             a = card.select_one("a")
-            title = a.get_text(strip=True) if a else "Offre Randstad"
-            raw_link = (a.get("href", "") if a else "") or card.get("data-href") or card.get("data-url")
-            link = sanitize_link(base, raw_link)
+            title = a.get_text(strip=True) if a else (card.get_text(" ", strip=True)[:60] or "Offre Adecco")
+            link = extract_best_link(card, base)
+            if not link and a: link = sanitize_link(base, a.get("href", ""))
             if not is_http_url(link): continue
             desc = card.get_text(" ", strip=True)
             city = pick_city_from_text(desc)
             offers.append({
-                "title": title, "employer": "Randstad", "city": city, "link": link, "raw": desc
-            })
-        if offers: return offers
-    except Exception:
-        pass
-    # Fallback
-    try:
-        url = base + "/offres/"
-        params = {"k": "saisonnier logement"} if FRANCE_WIDE else {"k": "saisonnier logement", "l": "Clermont-Ferrand"}
-        r = safe_get(url, params)
-        soup = BeautifulSoup(r.text, "lxml")
-        offers = []
-        for card in soup.select("article, .result-list__item, li"):
-            a = card.select_one("a")
-            title = a.get_text(strip=True) if a else "Offre Randstad"
-            raw_link = (a.get("href", "") if a else "") or card.get("data-href") or card.get("data-url")
-            link = sanitize_link(base, raw_link)
-            if not is_http_url(link): continue
-            desc = card.get_text(" ", strip=True)
-            city = pick_city_from_text(desc)
-            offers.append({
-                "title": title, "employer": "Randstad", "city": city, "link": link, "raw": desc
+                "title": title or "Offre Adecco",
+                "employer": "Adecco",
+                "city": city,
+                "link": link,
+                "raw": desc
             })
         return offers
-    except Exception:
+    except Exception as e:
+        print(f"[WARN] Adecco failed: {e}")
         return []
 
-# Ajoute d’autres providers API ici (France Travail API / Adzuna / Jooble) si tu veux – lecture via secrets.
-
-PROVIDERS = [
-    fetch_france_travail,
-    fetch_indeed,
-    fetch_vitijob,
+# ===============================================================
+#                          PIPELINE
+# ===============================================================
+API_PROVIDERS = [
+    fetch_france_travail_api,
+    fetch_adzuna_api,
+    fetch_jooble_api
+]
+HTML_FALLBACKS = [
+    fetch_france_travail_html,
     fetch_saisonnier_fr,
     fetch_lhotellerie,
     fetch_anefa_jobsagri,
-    fetch_adecco,
-    fetch_manpower,
-    fetch_randstad
+    fetch_adecco
 ]
 
-# -------- Pipeline --------
 def collect_offers() -> List[Dict[str, Any]]:
     items: List[Dict[str, Any]] = []
-    for provider in PROVIDERS:
+    # APIs d'abord
+    for provider in API_PROVIDERS + HTML_FALLBACKS:
         try:
             batch = provider()
             items += batch
             print(f"[PROVIDER] {provider.__name__}: {len(batch)} offres")
-            time.sleep(1.0)
+            time.sleep(0.8)
         except Exception as e:
             print(f"[WARN] Provider {provider.__name__} failed: {e}")
     print(f"[INFO] Total offres collectées (brut): {len(items)}")
@@ -650,7 +690,7 @@ def enrich_and_filter(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     if not origin:
         raise RuntimeError("Impossible de géocoder la ville d'origine.")
 
-    enriched_candidates: List[Dict[str, Any]] = []
+    candidates: List[Dict[str, Any]] = []
     seen_links = set()
 
     for it in items:
@@ -659,17 +699,16 @@ def enrich_and_filter(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         if link in seen_links: continue
         seen_links.add(link)
 
-        # Texte listing
         text_preview = " ".join([it.get("title",""), it.get("employer",""), it.get("city",""), it.get("raw","")]).strip()
         title = it.get("title","")
         employer = it.get("employer","")
         city = it.get("city","") or pick_city_from_text(text_preview)
 
-        # Filtrage de base (formation/exp/logement plus tard sur détail si besoin)
+        # Formation / Expérience (listing)
         if requires_training(text_preview): continue
         if not experience_ok(text_preview): continue
 
-        # Détail si besoin (métier/logement)
+        # Charger détail si besoin (métier/logement)
         detail_text = ""
         need_detail = (not role_allowed(text_preview)) or (HOUSING_REQUIRED and not matches_housing(text_preview))
         if need_detail:
@@ -681,18 +720,18 @@ def enrich_and_filter(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         if not role_allowed(check_text):
             continue
 
-        # Logement
-        if HOUSING_REQUIRED and not (matches_housing(check_text)):
+        # Logement requis
+        if HOUSING_REQUIRED and not matches_housing(check_text):
             continue
 
-        # Formation / Expérience (aussi sur détail)
+        # Formation / Expérience (sur détail)
         if requires_training(check_text): continue
         if not experience_ok(check_text): continue
 
-        # Permis : on accepte, mais on marquera pour tri
+        # Permis: on accepte, mais on note pour priorisation
         requires_permit = bool(mentions_permit(check_text))
 
-        # Améliorer employer/ville depuis le détail
+        # Améliorations depuis le détail
         if detail_text:
             if not employer:
                 m_emp = re.search(r"(?:Société|Entreprise|Employeur)\s*[:\-]\s*([^\n|]+)", detail_text, re.I)
@@ -713,7 +752,7 @@ def enrich_and_filter(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             fb_phone, _ = fallback_contacts(employer, city)
             if fb_phone: phone = fb_phone
 
-        enriched_candidates.append({
+        candidates.append({
             "title": title,
             "employer": employer,
             "city": city,
@@ -723,21 +762,20 @@ def enrich_and_filter(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             "email": email,
             "raw": check_text,
             "recent_bias": -1 if looks_recent(check_text) else 0,
-            "requires_permit": requires_permit  # NEW: pour tri + dédup
+            "requires_permit": requires_permit
         })
 
-    # ---------- Déduplication avancée ----------
+    # Dédup avancée (titre+employeur+ville)
     def canon(s: str) -> str:
         return re.sub(r"\s+", " ", (s or "").lower().strip())
 
     best_by_sig: Dict[Tuple[str, str, str], Dict[str, Any]] = {}
-    for o in enriched_candidates:
+    for o in candidates:
         sig = (canon(o["title"]), canon(o["employer"]), canon(o["city"]))
         prev = best_by_sig.get(sig)
         if not prev:
             best_by_sig[sig] = o
         else:
-            # Garde la meilleure : sans permis > avec permis, puis distance plus courte, puis plus récent
             prev_key = (prev["requires_permit"], prev["distance_km"], prev["recent_bias"])
             new_key  = (o["requires_permit"], o["distance_km"], o["recent_bias"])
             if new_key < prev_key:
@@ -745,7 +783,7 @@ def enrich_and_filter(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
     enriched = list(best_by_sig.values())
 
-    # ---------- Tri : récence -> sans permis d'abord -> distance ----------
+    # Tri: récence -> sans permis -> distance
     enriched.sort(key=lambda x: (x["recent_bias"], 1 if x["requires_permit"] else 0, x["distance_km"]))
 
     if len(enriched) < MAX_RESULTS:
@@ -755,7 +793,7 @@ def enrich_and_filter(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
 def make_email(offres: List[Dict[str, Any]]) -> tuple[str, str, str]:
     today = datetime.now().strftime("%d/%m/%Y")
-    subject = f"[{len(offres)}] Offres saisonnières - Clermont-Ferrand - {today}"
+    subject = f"[{len(offres)}] Offres saisonnières - Départ {ORIGIN_CITY} - {today}"
 
     lines_txt: List[str] = []
     rows_html: List[str] = []
@@ -797,7 +835,7 @@ def make_email(offres: List[Dict[str, Any]]) -> tuple[str, str, str]:
 <html>
   <body>
     <h2>Offres saisonnières (logement requis) — Départ: {ORIGIN_CITY}</h2>
-    <p>Règles: pas de formation obligatoire, expérience ≤ 1 an, métiers ciblés (service/bar/polyvalent, vente non alimentaire, rayon). Priorité aux offres <strong>sans permis</strong>.</p>
+    <p>Sources: APIs France Travail / Adzuna / Jooble (+ fallback HTML). Règles: pas de formation obligatoire, expérience ≤ 1 an, métiers ciblés (service/bar/polyvalent, vente non alimentaire, rayon). Priorité aux offres <strong>sans permis</strong>.</p>
     <table style="border-collapse:collapse; width:100%; border:1px solid #ddd;">
       <thead>
         <tr style="background:#f5f5f5;">
