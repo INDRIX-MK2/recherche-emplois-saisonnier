@@ -1,38 +1,19 @@
-name: jobsearch
+name: Job Search (daily & manual)
 
 on:
+  workflow_dispatch: {}
   schedule:
-    - cron: '0 7 * * *'  # 09:00 Europe/Paris (été UTC+2 => 07:00 UTC) / (hiver UTC+1 => 08:00 UTC)
-  workflow_dispatch:
-    inputs:
-      origin_city:
-        description: "Ville de départ pour le tri (par défaut Clermont-Ferrand, France)"
-        required: false
-        default: "Clermont-Ferrand, France"
-      max_results:
-        description: "Nombre max d'offres (par défaut 30)"
-        required: false
-        default: "30"
-      sectors:
-        description: "Secteurs (ex: hotellerie-restauration,agri-vendanges)"
-        required: false
-        default: "hotellerie-restauration,agri-vendanges"
-      housing_required:
-        description: "Filtrer logement requis (true/false), par défaut true"
-        required: false
-        default: "true"
-
-permissions:
-  contents: read
+    - cron: "0 7 * * *"
 
 concurrency:
   group: jobsearch-daily
   cancel-in-progress: false
 
 jobs:
-  search-and-email:
+  jobsearch:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -40,15 +21,20 @@ jobs:
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: "3.11"
 
-      - name: Upgrade pip and install deps
+      - name: Install deps
         run: |
           python -m pip install --upgrade pip
-          pip install requests beautifulsoup4 lxml geopy
+          pip install requests beautifulsoup4 lxml geopy urllib3
 
-      - name: Run search and send mail
+      - name: Run job search
         env:
+          ORIGIN_CITY: "Clermont-Ferrand, France"
+          MAX_RESULTS: "50"
+          HOUSING_REQUIRED: "true"
+          FALLBACK_CONTACTS: "true"
+          FRANCE_WIDE: "true"
           SMTP_HOST: ${{ secrets.SMTP_HOST }}
           SMTP_PORT: ${{ secrets.SMTP_PORT }}
           SMTP_USER: ${{ secrets.SMTP_USER }}
@@ -56,10 +42,5 @@ jobs:
           SMTP_FROM: ${{ secrets.SMTP_FROM }}
           RECIPIENTS: ${{ secrets.RECIPIENTS }}
           NOMINATIM_EMAIL: ${{ secrets.NOMINATIM_EMAIL }}
-          FALLBACK_CONTACTS: ${{ secrets.FALLBACK_CONTACTS }}
-          ORIGIN_CITY: ${{ github.event.inputs.origin_city || 'Clermont-Ferrand, France' }}
-          MAX_RESULTS: ${{ github.event.inputs.max_results || '30' }}
-          SECTORS: ${{ github.event.inputs.sectors || 'hotellerie-restauration,agri-vendanges' }}
-          HOUSING_REQUIRED: ${{ github.event.inputs.housing_required || 'true' }}
         run: |
           python scripts/job_search.py
