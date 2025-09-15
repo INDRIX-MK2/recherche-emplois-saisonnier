@@ -1,7 +1,8 @@
-# scripts/job_search.py — v2.0 (HTML-only multi-sources)
-# Sources: France Travail (HTML), Saisonnier.fr, LHR, Jobagri, Adecco, Hellowork, Meteojob, Adzuna (HTML), Jobijoba, Indeed
-# Règles: logement requis, pas de diplôme obligatoire, exp <= 1 an, métiers ciblés,
-# accepte "Permis B" mais priorise sans permis, dédup avancée, tri récence -> sans permis -> distance
+# scripts/job_search.py — v2.2 (France entière, sans HOUSING_REQUIRED)
+# Sources HTML: France Travail, Saisonnier.fr, LHR, Jobagri, Adecco, HelloWork, Meteojob, Adzuna, Jobijoba, Indeed
+# Filtres: pas de diplôme obligatoire, expérience <= 1 an, métiers ciblés
+# Priorisation: offres SANS mention de permis > distance (depuis ORIGIN_CITY)
+# Dédup avancée: (titre + employeur + ville)
 
 import os
 import smtplib
@@ -26,17 +27,12 @@ from urllib3.util.retry import Retry
 # -------------------- Config --------------------
 ORIGIN_CITY = os.getenv("ORIGIN_CITY", "Clermont-Ferrand, France")
 MAX_RESULTS = int(os.getenv("MAX_RESULTS", "30"))  # seuil minimum visé (on n'écrête pas)
-HOUSING_REQUIRED = os.getenv("HOUSING_REQUIRED", "true").lower() == "true"
-FALLBACK_CONTACTS = os.getenv("FALLBACK_CONTACTS", "true").lower() == "true"
-FRANCE_WIDE = os.getenv("FRANCE_WIDE", "true").lower() == "true"  # France entière par défaut
-
 SMTP_HOST = os.getenv("SMTP_HOST")
 SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
 SMTP_USER = os.getenv("SMTP_USER")
 SMTP_PASS = os.getenv("SMTP_PASS")
 SMTP_FROM = os.getenv("SMTP_FROM")
 RECIPIENTS = [e.strip() for e in os.getenv("RECIPIENTS", "").split(",") if e.strip()]
-
 NOMINATIM_EMAIL = os.getenv("NOMINATIM_EMAIL", "example@example.com")
 PROXY = os.getenv("PROXY")  # optionnel
 
@@ -49,7 +45,7 @@ UA_POOL = [
 BASE_HEADERS = {"Accept-Language": "fr-FR,fr;q=0.9", "Cache-Control": "no-cache"}
 PROXIES = {"http": PROXY, "https": PROXY} if PROXY else None
 
-# -------------------- HTTP Session --------------------
+# -------------------- HTTP --------------------
 SESSION = requests.Session()
 retry = Retry(total=3, backoff_factor=0.6, status_forcelist=[429, 500, 502, 503, 504])
 adapter = HTTPAdapter(max_retries=retry)
@@ -135,15 +131,15 @@ def _has_any(text: str, words: List[str]) -> bool:
 
 def _role_is_cleaning_only(text: str) -> bool:
     t = text.lower()
-    if not _has_any(t, CLEANING_SOFT):
-        return False
-    return not (_has_any(t, SERVICE_BAR_POLY) or _has_any(t, VENTE_OBJETS) or _has_any(t, RAYON_MERCH))
+    return _has_any(t, CLEANING_SOFT) and not (
+        _has_any(t, SERVICE_BAR_POLY) or _has_any(t, VENTE_OBJETS) or _has_any(t, RAYON_MERCH)
+    )
 
 def _role_is_plonge_only(text: str) -> bool:
     t = text.lower()
-    if not _has_any(t, PLONGE_SOFT):
-        return False
-    return not (_has_any(t, SERVICE_BAR_POLY) or _has_any(t, VENTE_OBJETS) or _has_any(t, RAYON_MERCH))
+    return _has_any(t, PLONGE_SOFT) and not (
+        _has_any(t, SERVICE_BAR_POLY) or _has_any(t, VENTE_OBJETS) or _has_any(t, RAYON_MERCH)
+    )
 
 def role_allowed(text: str) -> bool:
     t = text.lower()
@@ -151,91 +147,69 @@ def role_allowed(text: str) -> bool:
         return False
     if _role_is_cleaning_only(t) or _role_is_plonge_only(t):
         return False
-    allow_hit = _has_any(t, SERVICE_BAR_POLY) or _has_any(t, VENTE_OBJETS) or _has_any(t, RAYON_MERCH)
-    return allow_hit
+    return _has_any(t, SERVICE_BAR_POLY) or _has_any(t, VENTE_OBJETS) or _has_any(t, RAYON_MERCH)
 
-# -------------------- Logement & autres filtres --------------------
-HOUSING_KEYS = [
-    "logé", "loge", "logement fourni", "logement inclus", "logement possible",
-    "nourri", "logé nourri", "loge nourri", "hébergement fourni", "hébergement", "logement sur place"
-]
-def matches_housing(text: str) -> bool:
-    t = text.lower()
-    return any(k in t for k in HOUSING_KEYS)
-
+# -------------------- Diplôme & Expérience --------------------
 TRAINING_KEYWORDS = [
     "diplôme", "diplome", "cap", "bep", "bac", "bts", "dut", "licence", "master", "bac+",
-    "certificat", "certification", "caces", "ssiap", "haccp", "h a c c p", "titre professionnel"
+    "certificat", "certification", "caces", "ssiap", "haccp", "titre professionnel"
 ]
 TRAINING_REQUIRE_WORDS = ["exig", "requis", "obligatoire", "indispensable", "nécessaire"]
+
 def requires_training(text: str) -> bool:
     t = text.lower()
-    has_training = any(k in t for k in TRAINING_KEYWORDS)
-    has_requirement = any(w in t for w in TRAINING_REQUIRE_WORDS)
-    return has_training and has_requirement
+    return any(k in t for k in TRAINING_KEYWORDS) and any(w in t for w in TRAINING_REQUIRE_WORDS)
 
 RE_YEARS = re.compile(r"(\d+)\s*(?:an|ans)\s+d[' ]?exp[ée]rience", re.I)
 RE_RANGE = re.compile(r"(\d+)\s*(?:à|-|–|—)\s*(\d+)\s*(?:an|ans)\s+d[' ]?exp[ée]rience", re.I)
 RE_MIN = re.compile(r"(?:au moins|minimum|min\.?)\s*(\d+)\s*(?:an|ans)", re.I)
+
 def experience_ok(text: str) -> bool:
     t = text.lower()
     if "débutant accepté" in t or "debutant accepté" in t or "sans expérience" in t or "sans experience" in t:
         return True
-    if ("expérience exigée" in t or "experience exigée" in t or
-        "expérience requise" in t or "experience requise" in t or
-        "expérience indispensable" in t or "experience indispensable" in t or
-        "expérience obligatoire" in t or "experience obligatoire" in t or
-        "expérience significative" in t or "experience significative" in t):
+    if "expérience exigée" in t or "expérience requise" in t or "expérience indispensable" in t:
         return False
     m_range = RE_RANGE.search(t)
     if m_range:
-        x = int(m_range.group(1)); y = int(m_range.group(2))
-        return max(x, y) <= 1
+        return max(int(m_range.group(1)), int(m_range.group(2))) <= 1
     m_min = RE_MIN.search(t)
     if m_min:
-        x = int(m_min.group(1)); return x <= 1
+        return int(m_min.group(1)) <= 1
     m_years = RE_YEARS.search(t)
     if m_years:
-        x = int(m_years.group(1)); return x <= 1
-    if "première expérience" in t or "premiere experience" in t or "1ère expérience" in t:
-        return True
+        return int(m_years.group(1)) <= 1
     return True
 
-def looks_recent(text: str) -> bool:
-    t = text.lower()
-    today = datetime.now().strftime("%d/%m/%Y")
-    hints = ["aujourd’hui", "aujourd'hui", "today", "il y a ", "nouvelle offre", today]
-    return any(h in t for h in hints)
+# -------------------- Permis / Ville --------------------
+def mentions_permit(text: str) -> bool:
+    return "permi" in text.lower()
 
 def pick_city_from_text(text: str) -> str:
     m = re.search(r"([A-ZÉÈÎÏÔÂÇa-zÀ-ÿ' -]+)\s*\((\d{2,3})\)", text)
     if m:
         return f"{m.group(1).strip()} ({m.group(2)})"
+    # fallback simple: on évite les faux positifs
     m2 = re.search(r"\b(?:à|sur|près de|proche de)\s+([A-ZÉÈÎÏÔÂÇa-zÀ-ÿ' -]{3,40})", text)
-    if m2:
-        return m2.group(1).strip()
-    return ""
-
-def mentions_permit(text: str) -> bool:
-    return "permi" in text.lower()
+    return m2.group(1).strip() if m2 else ""
 
 # -------------------- Contacts --------------------
 EMAIL_RE = re.compile(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", re.I)
 PHONE_RE = re.compile(r"(?:(?:\+33\s?|0)(?:\s|\.|-)?)?[1-9](?:[\s\.\-]?\d{2}){4}")
+
 def normalize_phone(s: str) -> str:
     return re.sub(r"\s+", " ", s.strip())
+
 def extract_contacts_from_html(html: str) -> Tuple[Optional[str], Optional[str]]:
     phone = None; email = None
     soup = BeautifulSoup(html, "lxml")
     a_mail = soup.select_one("a[href^='mailto:']")
     if a_mail:
-        mail_href = a_mail.get("href", "")
-        m = re.search(EMAIL_RE, mail_href)
+        m = EMAIL_RE.search(a_mail.get("href", ""))
         if m: email = m.group(0)
     a_tel = soup.select_one("a[href^='tel:']")
     if a_tel:
-        tel_href = a_tel.get("href", "")
-        m = re.search(PHONE_RE, tel_href)
+        m = PHONE_RE.search(a_tel.get("href", ""))
         if m: phone = normalize_phone(m.group(0))
     if not email:
         m = EMAIL_RE.search(html)
@@ -255,49 +229,7 @@ def fetch_contact_details(url: str) -> Tuple[Optional[str], Optional[str]]:
         print(f"[INFO] No direct contacts extracted from {url}: {e}")
         return None, None
 
-# -------------------- Fallback annuaires --------------------
-def pj_phone_lookup(employer: str, city_hint: str) -> Optional[str]:
-    if not employer: return None
-    q = f"{employer} {city_hint}".strip()
-    url = "https://www.pagesjaunes.fr/recherche"
-    params = {"quoiqui": q}
-    try:
-        r = safe_get(url, params=params)
-        soup = BeautifulSoup(r.text, "lxml")
-        for tel in soup.select("a.tel, span.number, div.bi-bloc-contact a"):
-            text = tel.get_text(" ", strip=True)
-            m = PHONE_RE.search(text)
-            if m: return normalize_phone(m.group(0))
-        m = PHONE_RE.search(soup.get_text(" ", strip=True))
-        if m: return normalize_phone(m.group(0))
-    except Exception as e:
-        print(f"[INFO] PagesJaunes lookup failed: {e}")
-    return None
-
-def ae_phone_lookup(employer: str, city_hint: str) -> Optional[str]:
-    if not employer: return None
-    q = urllib.parse.quote_plus(f"{employer} {city_hint}".strip())
-    url = f"https://annuaire-entreprises.data.gouv.fr/rechercher?q={q}"
-    try:
-        r = safe_get(url)
-        soup = BeautifulSoup(r.text, "lxml")
-        first = soup.select_one("a[href*='/entreprise/']")
-        if first:
-            href = first.get("href", "")
-            if href and href.startswith("/entreprise/"):
-                fiche = safe_get("https://annuaire-entreprises.data.gouv.fr" + href)
-                m = PHONE_RE.search(fiche.text)
-                if m: return normalize_phone(m.group(0))
-    except Exception as e:
-        print(f"[INFO] Annuaire-Entreprises lookup failed: {e}")
-    return None
-
-def fallback_contacts(employer: str, city: str) -> Tuple[Optional[str], Optional[str]]:
-    if not FALLBACK_CONTACTS or not employer: return None, None
-    phone = pj_phone_lookup(employer, city) or ae_phone_lookup(employer, city)
-    return phone, None
-
-# -------------------- Helpers URLs --------------------
+# -------------------- URL helpers --------------------
 def is_http_url(u: Optional[str]) -> bool:
     return bool(u) and (u.startswith("http://") or u.startswith("https://"))
 
@@ -317,47 +249,31 @@ def sanitize_link(base: str, raw: Optional[str]) -> str:
 #                       SCRAPERS (HTML)
 # ===============================================================
 
+# France Travail (HTML)
 def fetch_france_travail_html() -> List[Dict[str, Any]]:
     base = "https://candidat.francetravail.fr"
     search_url = base + "/offres/recherche"
-    common_params = {"motsCles": "saisonnier logé OR logement fourni OR hébergement"}
-    if not FRANCE_WIDE:
-        common_params.update({"lieu": "Clermont-Ferrand (63)", "rayon": "200"})
-    offers: List[Dict[str, Any]] = []
-    visited = 0
-    next_url = search_url
-    next_params = dict(common_params)
-    while next_url and visited < 3:
-        r = safe_get(next_url, params=next_params)
-        soup = BeautifulSoup(r.text, "lxml")
-        cards = soup.select("[data-id-offre]") or soup.select("article, li, div")
-        for card in cards:
-            title_el = card.select_one("h3, h2, .media-heading")
-            title = title_el.get_text(strip=True) if title_el else "Offre"
-            employer_el = card.select_one(".t4.color-dark-blue, [data-testid='company-name'], .company, .entreprise")
-            employer = employer_el.get_text(strip=True) if employer_el else ""
-            city_el = card.select_one(".subtext, [data-testid='lieu'], .location, .lieu")
-            city = city_el.get_text(strip=True) if city_el else ""
-            raw_link = card.get("data-href")
-            if not raw_link:
-                a = card.find("a", href=True); raw_link = a.get("href", "") if a else ""
-            link = sanitize_link(base, raw_link)
-            if not is_http_url(link): continue
-            desc = card.get_text(" ", strip=True)
-            offers.append({"title": title, "employer": employer, "city": city or pick_city_from_text(desc), "link": link, "raw": desc})
-        next_link = soup.select_one("a[rel='next'], a[aria-label*='suiv'], a[title*='suiv']")
-        if next_link and next_link.get("href"):
-            full = urllib.parse.urljoin(base, next_link.get("href"))
-            parsed = urllib.parse.urlparse(full)
-            next_url = urllib.parse.urlunparse((parsed.scheme, parsed.netloc, parsed.path, "", "", ""))
-            next_params = dict(common_params)
-            next_params.update(dict(urllib.parse.parse_qsl(parsed.query)))
-            visited += 1
-            time.sleep(0.6)
-        else:
-            break
+    params = {"motsCles": "saisonnier logé OR logement OR hébergement"}
+    r = safe_get(search_url, params=params)
+    soup = BeautifulSoup(r.text, "lxml")
+    offers = []
+    cards = soup.select("[data-id-offre]") or []
+    for card in cards:
+        title_el = card.select_one("h3, h2, .media-heading")
+        title = title_el.get_text(strip=True) if title_el else "Offre"
+        employer_el = card.select_one(".t4.color-dark-blue, .company, .entreprise")
+        employer = employer_el.get_text(strip=True) if employer_el else ""
+        raw_link = card.get("data-href") or ""
+        if not raw_link:
+            a = card.find("a", href=True)
+            if a: raw_link = a.get("href", "")
+        link = sanitize_link(base, raw_link)
+        if not is_http_url(link): continue
+        desc = card.get_text(" ", strip=True)
+        offers.append({"title": title, "employer": employer, "city": pick_city_from_text(desc), "link": link, "raw": desc})
     return offers
 
+# Saisonnier.fr
 def fetch_saisonnier_fr() -> List[Dict[str, Any]]:
     base = "https://www.saisonnier.fr"
     url = base + "/emplois"
@@ -367,12 +283,14 @@ def fetch_saisonnier_fr() -> List[Dict[str, Any]]:
     for card in soup.select("article, .job-card, li, .job, .search-item"):
         a = card.select_one("a")
         if not a: continue
-        title = a.get_text(strip=True)
+        title = a.get_text(strip=True) or "Offre Saisonnier.fr"
         link = sanitize_link(base, a.get("href", ""))
+        if not is_http_url(link): continue
         desc = card.get_text(" ", strip=True)
-        offers.append({"title": title or "Offre Saisonnier.fr", "employer": "", "city": pick_city_from_text(desc), "link": link, "raw": desc})
+        offers.append({"title": title, "employer": "", "city": pick_city_from_text(desc), "link": link, "raw": desc})
     return offers
 
+# L’Hôtellerie-Restauration
 def fetch_lhotellerie() -> List[Dict[str, Any]]:
     base = "https://www.lhotellerie-restauration.fr"
     url = base + "/emploi/"
@@ -382,12 +300,14 @@ def fetch_lhotellerie() -> List[Dict[str, Any]]:
     for card in soup.select("article, .offre, .annonce"):
         a = card.select_one("a")
         if not a: continue
-        title = a.get_text(strip=True)
+        title = a.get_text(strip=True) or "Offre Hôtellerie-Restauration"
         link = sanitize_link(base, a.get("href", ""))
+        if not is_http_url(link): continue
         desc = card.get_text(" ", strip=True)
-        offers.append({"title": title or "Offre Hôtellerie-Restauration", "employer": "", "city": pick_city_from_text(desc), "link": link, "raw": desc})
+        offers.append({"title": title, "employer": "", "city": pick_city_from_text(desc), "link": link, "raw": desc})
     return offers
 
+# Jobagri
 def fetch_jobagri() -> List[Dict[str, Any]]:
     base = "https://www.jobagri.com"
     url = base + "/offres"
@@ -397,16 +317,18 @@ def fetch_jobagri() -> List[Dict[str, Any]]:
     for card in soup.select("article, .job, .offre, li"):
         a = card.select_one("a")
         if not a: continue
-        title = a.get_text(strip=True)
+        title = a.get_text(strip=True) or "Offre Jobagri"
         link = sanitize_link(base, a.get("href", ""))
+        if not is_http_url(link): continue
         desc = card.get_text(" ", strip=True)
-        offers.append({"title": title or "Offre agricole", "employer": "", "city": pick_city_from_text(desc), "link": link, "raw": desc})
+        offers.append({"title": title, "employer": "", "city": pick_city_from_text(desc), "link": link, "raw": desc})
     return offers
 
+# Adecco
 def fetch_adecco() -> List[Dict[str, Any]]:
     base = "https://www.adecco.fr"
     url = base + "/resultats-offres-emploi/"
-    params = {"k": "saisonnier logé"} if FRANCE_WIDE else {"k": "saisonnier logé", "l": "Clermont-Ferrand"}
+    params = {"k": "saisonnier logé logement"}
     r = safe_get(url, params=params)
     soup = BeautifulSoup(r.text, "lxml")
     offers = []
@@ -420,10 +342,11 @@ def fetch_adecco() -> List[Dict[str, Any]]:
         offers.append({"title": title, "employer": "Adecco", "city": pick_city_from_text(desc), "link": link, "raw": desc})
     return offers
 
+# HelloWork
 def fetch_hellowork() -> List[Dict[str, Any]]:
     base = "https://www.hellowork.com"
-    url = base + "/fr-fr/emplois"
-    params = {"k": "saisonnier logement" if FRANCE_WIDE else "saisonnier logement", "l": "" if FRANCE_WIDE else "Clermont-Ferrand"}
+    url = base + "/fr-fr/emploi"
+    params = {"k": "saisonnier logement"}
     r = safe_get(url, params=params)
     soup = BeautifulSoup(r.text, "lxml")
     offers = []
@@ -437,11 +360,11 @@ def fetch_hellowork() -> List[Dict[str, Any]]:
         offers.append({"title": title, "employer": "", "city": pick_city_from_text(desc), "link": link, "raw": desc})
     return offers
 
+# Meteojob
 def fetch_meteojob() -> List[Dict[str, Any]]:
     base = "https://www.meteojob.com"
     url = base + "/emploi"
     params = {"q": "saisonnier logement"}
-    if not FRANCE_WIDE: params["l"] = "Clermont-Ferrand"
     r = safe_get(url, params=params)
     soup = BeautifulSoup(r.text, "lxml")
     offers = []
@@ -455,11 +378,11 @@ def fetch_meteojob() -> List[Dict[str, Any]]:
         offers.append({"title": title, "employer": "", "city": pick_city_from_text(desc), "link": link, "raw": desc})
     return offers
 
+# Adzuna (HTML)
 def fetch_adzuna_html() -> List[Dict[str, Any]]:
     base = "https://www.adzuna.fr"
-    # recherche simple france entière
     url = base + "/search"
-    params = {"what": "saisonnier logé logement", "where": "" if FRANCE_WIDE else "Clermont-Ferrand"}
+    params = {"what": "saisonnier logé logement", "where": ""}
     r = safe_get(url, params=params)
     soup = BeautifulSoup(r.text, "lxml")
     offers = []
@@ -473,11 +396,11 @@ def fetch_adzuna_html() -> List[Dict[str, Any]]:
         offers.append({"title": title, "employer": "", "city": pick_city_from_text(desc), "link": link, "raw": desc})
     return offers
 
+# Jobijoba
 def fetch_jobijoba() -> List[Dict[str, Any]]:
     base = "https://www.jobijoba.com"
-    # URL de recherche centrale; certains contenus sont côté serveur
     url = base + "/fr/recherche-emploi"
-    params = {"k": "saisonnier logé", "l": "" if FRANCE_WIDE else "Clermont-Ferrand"}
+    params = {"k": "saisonnier logé", "l": ""}
     r = safe_get(url, params=params)
     soup = BeautifulSoup(r.text, "lxml")
     offers = []
@@ -491,12 +414,11 @@ def fetch_jobijoba() -> List[Dict[str, Any]]:
         offers.append({"title": title, "employer": "", "city": pick_city_from_text(desc), "link": link, "raw": desc})
     return offers
 
+# Indeed (souvent anti-bot; on gère l’erreur et on continue)
 def fetch_indeed() -> List[Dict[str, Any]]:
     base = "https://fr.indeed.com"
     url = base + "/jobs"
     params = {"q": "saisonnier (logé OR logement OR loge) (serveur OR serveuse OR vendange OR cueillette OR plonge)"}
-    if not FRANCE_WIDE:
-        params.update({"l": "Clermont-Ferrand (63)", "radius": "200"})
     try:
         r = safe_get(url, params=params)
         soup = BeautifulSoup(r.text, "lxml")
@@ -537,13 +459,19 @@ def collect_offers() -> List[Dict[str, Any]]:
             batch = provider()
             items.extend(batch)
             print(f"[PROVIDER] {provider.__name__}: {len(batch)} offres")
-            time.sleep(0.6)
+            time.sleep(0.5)
         except Exception as e:
             print(f"[WARN] Provider {provider.__name__} failed: {e}")
     print(f"[INFO] Total offres collectées (brut): {len(items)}")
     return items
 
 # -------------------- Filtrage & enrichissement --------------------
+def looks_recent(text: str) -> bool:
+    t = text.lower()
+    today = datetime.now().strftime("%d/%m/%Y")
+    hints = ["aujourd’hui", "aujourd'hui", "today", "il y a ", "nouvelle offre", today]
+    return any(h in t for h in hints)
+
 def enrich_and_filter(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     geo, rate = geocoder()
     origin = geocode(ORIGIN_CITY, geo, rate)
@@ -564,14 +492,15 @@ def enrich_and_filter(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         city = it.get("city","")
         text_preview = " ".join([title, employer, city, it.get("raw","")]).strip()
 
-        # Filtrage listing
-        if requires_training(text_preview): continue
-        if not experience_ok(text_preview): continue
+        # Filtres sur le listing
+        if requires_training(text_preview): 
+            continue
+        if not experience_ok(text_preview): 
+            continue
 
-        # Détail si nécessaire
+        # Si le rôle n'est pas clairement autorisé, on charge la page détail pour vérifier
         detail_text = ""
-        need_detail = (not role_allowed(text_preview)) or (HOUSING_REQUIRED and not matches_housing(text_preview))
-        if need_detail:
+        if not role_allowed(text_preview):
             try:
                 r = safe_get(link)
                 soup = BeautifulSoup(r.text, "lxml")
@@ -581,26 +510,25 @@ def enrich_and_filter(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
         check_text = (text_preview + " " + (detail_text or "")).strip()
 
-        # Métier
+        # Métier cible
         if not role_allowed(check_text):
             continue
 
-        # Logement requis
-        if HOUSING_REQUIRED and not matches_housing(check_text):
+        # Revalidation diplôme/expérience avec le détail
+        if requires_training(check_text): 
+            continue
+        if not experience_ok(check_text): 
             continue
 
-        # Formation/exp sur détail
-        if requires_training(check_text): continue
-        if not experience_ok(check_text): continue
-
+        # Permis
         requires_permit = bool(mentions_permit(check_text))
 
-        # city depuis détail si vide
+        # Ville depuis le détail si absente
         if not city:
             c2 = pick_city_from_text(check_text)
             if c2: city = c2
 
-        # Distance
+        # Distance (si ville géocodable)
         dist_km = 99999
         coords = geocode(city, geo, rate) if city else None
         if coords and origin:
@@ -608,18 +536,17 @@ def enrich_and_filter(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
         # Contacts
         phone, email = fetch_contact_details(link)
-        if not phone and FALLBACK_CONTACTS and employer:
-            fb_phone, _ = fallback_contacts(employer, city)
-            if fb_phone: phone = fb_phone
 
         candidates.append({
             "title": title, "employer": employer, "city": city,
-            "distance_km": dist_km, "link": link, "phone": phone, "email": email,
-            "raw": check_text, "recent_bias": -1 if looks_recent(check_text) else 0,
+            "distance_km": dist_km, "link": link,
+            "phone": phone, "email": email,
+            "raw": check_text,
+            "recent_bias": -1 if looks_recent(check_text) else 0,
             "requires_permit": requires_permit
         })
 
-    # Dédup avancée (titre+employeur+ville)
+    # Dédup: (titre+employeur+ville)
     def canon(s: str) -> str:
         return re.sub(r"\s+", " ", (s or "").lower().strip())
 
@@ -642,12 +569,13 @@ def enrich_and_filter(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
     if len(enriched) < MAX_RESULTS:
         print(f"[INFO] Seulement {len(enriched)} offres trouvées après filtrage (seuil min {MAX_RESULTS}).")
+
     return enriched
 
 # -------------------- Email --------------------
 def make_email(offres: List[Dict[str, Any]]) -> tuple[str, str, str]:
     today = datetime.now().strftime("%d/%m/%Y")
-    subject = f"[{len(offres)}] Offres saisonnières - Départ {ORIGIN_CITY} - {today}"
+    subject = f"[{len(offres)}] Offres saisonnières (France entière) — Départ {ORIGIN_CITY} — {today}"
 
     lines_txt: List[str] = []
     rows_html: List[str] = []
@@ -683,13 +611,14 @@ def make_email(offres: List[Dict[str, Any]]) -> tuple[str, str, str]:
             f"</tr>"
         )
 
-    text = "\n".join(lines_txt) if lines_txt else "Aucune offre trouvée aujourd'hui avec les filtres."
+    text = "\n".join(lines_txt) if lines_txt else "Aucune offre ne correspond aux filtres aujourd'hui."
     html = f"""
 <!DOCTYPE html>
 <html>
   <body>
-    <h2>Offres saisonnières (logement requis) — Départ: {ORIGIN_CITY}</h2>
-    <p>Sources: France Travail (HTML), Hellowork, Meteojob, Adzuna, Jobijoba, Indeed, Saisonnier.fr, LHR, Jobagri, Adecco. Règles: pas de formation obligatoire, expérience ≤ 1 an, métiers ciblés (service/bar/polyvalent, vente non alimentaire, rayon). Priorité aux offres <strong>sans permis</strong>.</p>
+    <h2>Offres saisonnières — France entière — Départ: {ORIGIN_CITY}</h2>
+    <p>Sources: France Travail (HTML), HelloWork, Meteojob, Adzuna, Jobijoba, Indeed, Saisonnier.fr, LHR, Jobagri, Adecco.<br/>
+    Règles: pas de diplôme obligatoire, expérience ≤ 1 an, métiers ciblés (service/bar/polyvalent, vente non alimentaire, rayon). Priorité aux offres <strong>sans permis</strong>.</p>
     <table style="border-collapse:collapse; width:100%; border:1px solid #ddd;">
       <thead>
         <tr style="background:#f5f5f5;">
@@ -725,6 +654,7 @@ def send_email(subject: str, text: str, html: str):
         server.login(SMTP_USER, SMTP_PASS)
         server.sendmail(SMTP_FROM, RECIPIENTS, msg.as_string())
 
+# -------------------- Main --------------------
 def main():
     all_items = collect_offers()
     offers = enrich_and_filter(all_items)
