@@ -1,3 +1,4 @@
+# scripts/job_search.py — v1.2-patch (min 30 + filtre "Permis")
 import os, smtplib, ssl, math, time, re, urllib.parse
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
@@ -10,8 +11,9 @@ from geopy.geocoders import Nominatim
 from geopy.extra.rate_limiter import RateLimiter
 
 # -------- Config from env --------
+# NOTE: MAX_RESULTS est interprété ici comme un SEUIL MINIMUM d'attentes (on n'impose plus de plafond).
 ORIGIN_CITY = os.getenv("ORIGIN_CITY", "Clermont-Ferrand, France")
-MAX_RESULTS = int(os.getenv("MAX_RESULTS", "30"))
+MAX_RESULTS = int(os.getenv("MAX_RESULTS", "30"))  # Seuil MINIMUM attendu (pas un plafond)
 SECTORS = [s.strip().lower() for s in os.getenv("SECTORS", "hotellerie-restauration,agri-vendanges").split(",")]
 HOUSING_REQUIRED = os.getenv("HOUSING_REQUIRED", "true").lower() == "true"
 FALLBACK_CONTACTS = os.getenv("FALLBACK_CONTACTS", "true").lower() == "true"
@@ -113,32 +115,29 @@ def extract_contacts_from_html(html: str) -> Tuple[Optional[str], Optional[str]]
     phone = None
     email = None
     soup = BeautifulSoup(html, "lxml")
+    # mailto / tel
     a_mail = soup.select_one("a[href^='mailto:']")
     if a_mail:
         mail_href = a_mail.get("href", "")
         m = re.search(EMAIL_RE, mail_href)
-        if m:
-            email = m.group(0)
+        if m: email = m.group(0)
     a_tel = soup.select_one("a[href^='tel:']")
     if a_tel:
         tel_href = a_tel.get("href", "")
         m = re.search(PHONE_RE, tel_href)
-        if m:
-            phone = normalize_phone(m.group(0))
+        if m: phone = normalize_phone(m.group(0))
+    # regex fallback global
     if not email:
         m = EMAIL_RE.search(html)
-        if m:
-            email = m.group(0)
+        if m: email = m.group(0)
     if not phone:
         m = PHONE_RE.search(html)
-        if m:
-            phone = normalize_phone(m.group(0))
+        if m: phone = normalize_phone(m.group(0))
     return phone, email
 
 def fetch_contact_details(url: str) -> Tuple[Optional[str], Optional[str]]:
     try:
-        if not url or not url.startswith("http"):
-            return None, None
+        if not url or not url.startswith("http"): return None, None
         r = safe_get(url)
         phone, email = extract_contacts_from_html(r.text)
         time.sleep(0.5)
@@ -193,7 +192,7 @@ def fallback_contacts(employer: str, city: str) -> Tuple[Optional[str], Optional
     if not FALLBACK_CONTACTS or not employer:
         return None, None
     phone = pj_phone_lookup(employer, city) or ae_phone_lookup(employer, city)
-    return phone, None
+    return phone, None  # email rarement disponible dans ces annuaires
 
 # -------- Providers --------
 def fetch_france_travail() -> List[Dict[str, Any]]:
@@ -441,16 +440,24 @@ def enrich_and_filter(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         seen_links.add(link)
 
         text = " ".join([it.get("title",""), it.get("employer",""), it.get("city",""), it.get("raw","")])
+
+        # --- Correctif demandé: exclure toute offre mentionnant "Permis"
+        if "permis" in text.lower():
+            continue
+
+        # Filtres essentiels
         if HOUSING_REQUIRED and not matches_housing(text):
             continue
         if not matches_sectors(text):
             continue
 
+        # Distance
         coords = geocode(it.get("city") or pick_city_from_text(text), geo, rate)
         dist_km = 99999
         if coords and origin:
             dist_km = round(haversine_km(origin[0], origin[1], coords[0], coords[1]))
 
+        # Contacts (best-effort)
         phone, email = fetch_contact_details(link)
         if not phone and FALLBACK_CONTACTS and it.get("employer"):
             fb_phone, _ = fallback_contacts(it.get("employer",""), it.get("city",""))
@@ -469,8 +476,15 @@ def enrich_and_filter(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             "recent_bias": -1 if looks_recent(text) else 0
         })
 
+    # Tri: récence (si détectée) puis distance
     enriched.sort(key=lambda x: (x["recent_bias"], x["distance_km"]))
-    return enriched[:MAX_RESULTS]
+
+    # --- Correctif "Minimum 30" : on NE COUPE PLUS à 30.
+    #     On logge juste si < 30 pour indiquer un volume faible ce jour-là.
+    if len(enriched) < MAX_RESULTS:
+        print(f"[INFO] Seulement {len(enriched)} offres trouvées après filtrage (seuil min {MAX_RESULTS}).")
+
+    return enriched  # on renvoie toutes les offres filtrées (≥30 si dispo)
 
 def make_email(offres: List[Dict[str, Any]]) -> tuple[str, str, str]:
     today = datetime.now().strftime("%d/%m/%Y")
@@ -486,6 +500,7 @@ def make_email(offres: List[Dict[str, Any]]) -> tuple[str, str, str]:
         if o.get("email"):
             contact_txt.append(f"Email: {o['email']}")
         contact_line = " | ".join(contact_txt) if contact_txt else "Contact: via lien"
+        # TXT
         line = (
             f"{i}. {o['title']} - {o.get('employer','')}\n"
             f"   📍 {o.get('city','')} - {dist}\n"
@@ -493,7 +508,7 @@ def make_email(offres: List[Dict[str, Any]]) -> tuple[str, str, str]:
             f"   🔗 {o['link']}\n"
         )
         lines_txt.append(line)
-
+        # HTML
         contact_html_parts = []
         if o.get("phone"):
             contact_html_parts.append(f"<div>Téléphone: <a href='tel:{o['phone']}'>{o['phone']}</a></div>")
@@ -501,7 +516,6 @@ def make_email(offres: List[Dict[str, Any]]) -> tuple[str, str, str]:
             contact_html_parts.append(f"<div>Email: <a href='mailto:{o['email']}'>{o['email']}</a></div>")
         if not contact_html_parts:
             contact_html_parts.append("<div>Contact: via lien</div>")
-
         rows_html.append(
             f"<tr>"
             f"<td style='padding:6px 8px;'>{i}</td>"
@@ -519,7 +533,7 @@ def make_email(offres: List[Dict[str, Any]]) -> tuple[str, str, str]:
 <html>
   <body>
     <h2>Offres saisonnières (logement requis) — Départ: {ORIGIN_CITY}</h2>
-    <p>Secteurs: {', '.join(SECTORS)} — Max: {MAX_RESULTS} — Fallback contacts: {"ON" if FALLBACK_CONTACTS else "OFF"}</p>
+    <p>Secteurs: {', '.join(SECTORS)} — Seuil minimum visé: {MAX_RESULTS} offres — Fallback contacts: {"ON" if FALLBACK_CONTACTS else "OFF"}</p>
     <table style="border-collapse:collapse; width:100%; border:1px solid #ddd;">
       <thead>
         <tr style="background:#f5f5f5;">
