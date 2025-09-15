@@ -1,7 +1,7 @@
-# scripts/job_search.py — v2.2 (France entière, sans HOUSING_REQUIRED)
-# Sources HTML: France Travail, Saisonnier.fr, LHR, Jobagri, Adecco, HelloWork, Meteojob, Adzuna, Jobijoba, Indeed
-# Filtres: pas de diplôme obligatoire, expérience <= 1 an, métiers ciblés
-# Priorisation: offres SANS mention de permis > distance (depuis ORIGIN_CITY)
+# scripts/job_search.py — v2.4 (France entière, filtre métiers strict)
+# Sources HTML stables: France Travail, Saisonnier.fr, LHR, Jobagri, Adecco, HelloWork, Meteojob, Adzuna, Jobijoba, Indeed (tolérance)
+# Filtres: whitelist métiers stricte, pas de diplôme obligatoire, expérience <= 1 an
+# Priorisation: offres SANS mention du permis > distance (depuis ORIGIN_CITY)
 # Dédup avancée: (titre + employeur + ville)
 
 import os
@@ -26,7 +26,7 @@ from urllib3.util.retry import Retry
 
 # -------------------- Config --------------------
 ORIGIN_CITY = os.getenv("ORIGIN_CITY", "Clermont-Ferrand, France")
-MAX_RESULTS = int(os.getenv("MAX_RESULTS", "30"))  # seuil minimum visé (on n'écrête pas)
+MAX_RESULTS = int(os.getenv("MAX_RESULTS", "50"))  # seuil minimum visé
 SMTP_HOST = os.getenv("SMTP_HOST")
 SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
 SMTP_USER = os.getenv("SMTP_USER")
@@ -89,65 +89,22 @@ def haversine_km(lat1, lon1, lat2, lon2):
     a = math.sin(dphi/2)**2 + math.cos(phi1)*math.cos(phi2)*math.sin(dlambda/2)**2
     return 2*R*math.asin(math.sqrt(a))
 
-# -------------------- Métier ciblé --------------------
-SERVICE_BAR_POLY = [
-    "serveur", "serveuse", "chef de rang", "runner",
-    "bar", "barman", "barmaid",
-    "polyvalent", "polyvalente", "employé polyvalent", "employée polyvalente",
-    "réceptionniste", "accueil", "accueillant", "accueillante", "hôtesse", "hôte"
+# -------------------- Whitelist métiers stricte --------------------
+ALLOWED_JOBS = [
+    "logé", "loge", "logement",
+    "serveur", "serveuse",
+    "bar", "barman", "barmaid", "aide man", "runner"
+    "hôte", "hotesse", "hôtesse",
+    "employé polyvalent", "employée polyvalente", "polyvalent", "polyvalente",
+    "plonge",
+    "vendeur", "vendeuse",
+    "prêt à porter", "pret a porter", "prêt-à-porter", "pret-a-porter",
+    "remise en rayon", "mise en rayon", "employé libre-service", "employée libre-service", "els"
 ]
-VENTE_OBJETS = [
-    "vendeur", "vendeuse", "conseiller de vente", "conseillère de vente",
-    "prêt-à-porter", "pret-a-porter", "mode", "boutique", "chaussures", "sport", "magasin",
-    "papeterie", "maison", "décoration", "electronique", "high-tech", "jouet", "bricolage"
-]
-RAYON_MERCH = [
-    "mise en rayon", "remise en rayon", "els", "employé libre-service", "employée libre-service",
-    "merchandising", "réassort", "reassort", "facing", "inventaire", "magasinier"
-]
-CUISINE_HARD = [
-    "cuisinier", "cuisinière", "cuisine", "commis de cuisine", "commis cuisine",
-    "chef de partie", "plongeur batterie", "préparateur culinaire", "snack", "pizzaiolo"
-]
-ALIMENTAIRE_HARD = [
-    "boucher", "bouchère", "boucherie", "charcutier", "charcuterie",
-    "poissonnier", "poissonnerie", "fromager", "fromagerie",
-    "boulanger", "boulangerie", "pâtissier", "pâtisserie", "patissier", "patisserie",
-    "primeur", "traiteur", "restauration rapide", "sandwicherie"
-]
-HYPER_CHAINS = [
-    "carrefour", "auchan", "leclerc", "intermarché", "intermarche", "lidl", "aldi",
-    "monoprix", "casino", "super u", "u express", "géant", "geant", "cora", "match", "spar"
-]
-CLEANING_SOFT = [
-    "agent d'entretien", "agent de nettoyage", "entretien", "nettoyage",
-    "femme de chambre", "valet de chambre", "gouvernante", "laveur", "laveuse"
-]
-PLONGE_SOFT = ["plonge", "plongeur", "plongeuse"]
-
-def _has_any(text: str, words: List[str]) -> bool:
-    t = text.lower()
-    return any(w in t for w in words)
-
-def _role_is_cleaning_only(text: str) -> bool:
-    t = text.lower()
-    return _has_any(t, CLEANING_SOFT) and not (
-        _has_any(t, SERVICE_BAR_POLY) or _has_any(t, VENTE_OBJETS) or _has_any(t, RAYON_MERCH)
-    )
-
-def _role_is_plonge_only(text: str) -> bool:
-    t = text.lower()
-    return _has_any(t, PLONGE_SOFT) and not (
-        _has_any(t, SERVICE_BAR_POLY) or _has_any(t, VENTE_OBJETS) or _has_any(t, RAYON_MERCH)
-    )
 
 def role_allowed(text: str) -> bool:
     t = text.lower()
-    if _has_any(t, CUISINE_HARD) or _has_any(t, ALIMENTAIRE_HARD) or _has_any(t, HYPER_CHAINS):
-        return False
-    if _role_is_cleaning_only(t) or _role_is_plonge_only(t):
-        return False
-    return _has_any(t, SERVICE_BAR_POLY) or _has_any(t, VENTE_OBJETS) or _has_any(t, RAYON_MERCH)
+    return any(w in t for w in ALLOWED_JOBS)
 
 # -------------------- Diplôme & Expérience --------------------
 TRAINING_KEYWORDS = [
@@ -179,7 +136,7 @@ def experience_ok(text: str) -> bool:
     m_years = RE_YEARS.search(t)
     if m_years:
         return int(m_years.group(1)) <= 1
-    return True
+    return True  # non spécifié => OK
 
 # -------------------- Permis / Ville --------------------
 def mentions_permit(text: str) -> bool:
@@ -189,7 +146,6 @@ def pick_city_from_text(text: str) -> str:
     m = re.search(r"([A-ZÉÈÎÏÔÂÇa-zÀ-ÿ' -]+)\s*\((\d{2,3})\)", text)
     if m:
         return f"{m.group(1).strip()} ({m.group(2)})"
-    # fallback simple: on évite les faux positifs
     m2 = re.search(r"\b(?:à|sur|près de|proche de)\s+([A-ZÉÈÎÏÔÂÇa-zÀ-ÿ' -]{3,40})", text)
     return m2.group(1).strip() if m2 else ""
 
@@ -220,10 +176,13 @@ def extract_contacts_from_html(html: str) -> Tuple[Optional[str], Optional[str]]
     return phone, email
 
 def fetch_contact_details(url: str) -> Tuple[Optional[str], Optional[str]]:
+    non_offer_hints = ["alternance", "/entreprise/", "/a-propos", "/contact", "/mentions", "/cgu", "/faq", "/apropos"]
+    if any(h in url for h in non_offer_hints):
+        return None, None
     try:
         r = safe_get(url)
         phone, email = extract_contacts_from_html(r.text)
-        time.sleep(0.3)
+        time.sleep(0.25)
         return phone, email
     except Exception as e:
         print(f"[INFO] No direct contacts extracted from {url}: {e}")
@@ -249,43 +208,55 @@ def sanitize_link(base: str, raw: Optional[str]) -> str:
 #                       SCRAPERS (HTML)
 # ===============================================================
 
-# France Travail (HTML)
+# France Travail (HTML) — pagination légère
 def fetch_france_travail_html() -> List[Dict[str, Any]]:
     base = "https://candidat.francetravail.fr"
     search_url = base + "/offres/recherche"
     params = {"motsCles": "saisonnier logé OR logement OR hébergement"}
-    r = safe_get(search_url, params=params)
-    soup = BeautifulSoup(r.text, "lxml")
-    offers = []
-    cards = soup.select("[data-id-offre]") or []
-    for card in cards:
-        title_el = card.select_one("h3, h2, .media-heading")
-        title = title_el.get_text(strip=True) if title_el else "Offre"
-        employer_el = card.select_one(".t4.color-dark-blue, .company, .entreprise")
-        employer = employer_el.get_text(strip=True) if employer_el else ""
-        raw_link = card.get("data-href") or ""
-        if not raw_link:
-            a = card.find("a", href=True)
-            if a: raw_link = a.get("href", "")
-        link = sanitize_link(base, raw_link)
-        if not is_http_url(link): continue
-        desc = card.get_text(" ", strip=True)
-        offers.append({"title": title, "employer": employer, "city": pick_city_from_text(desc), "link": link, "raw": desc})
+    offers: List[Dict[str, Any]] = []
+    for page in range(1, 3):  # jusqu'à 2 pages
+        p = dict(params)
+        if page > 1:
+            p["page"] = str(page)
+        r = safe_get(search_url, params=p)
+        soup = BeautifulSoup(r.text, "lxml")
+        cards = soup.select("[data-id-offre]") or soup.select("article, li, div")
+        got = 0
+        for card in cards:
+            raw_link = card.get("data-href") or ""
+            if not raw_link:
+                a = card.find("a", href=True)
+                raw_link = a.get("href", "") if a else ""
+            link = sanitize_link(base, raw_link)
+            if not is_http_url(link): 
+                continue
+            title_el = card.select_one("h3, h2, .media-heading")
+            title = title_el.get_text(strip=True) if title_el else "Offre"
+            employer_el = card.select_one(".t4.color-dark-blue, [data-testid='company-name'], .company, .entreprise")
+            employer = employer_el.get_text(strip=True) if employer_el else ""
+            desc = card.get_text(" ", strip=True)
+            offers.append({
+                "title": title, "employer": employer, "city": pick_city_from_text(desc),
+                "link": link, "raw": desc
+            })
+            got += 1
+        if got == 0:
+            break
+        time.sleep(0.6)
     return offers
 
 # Saisonnier.fr
 def fetch_saisonnier_fr() -> List[Dict[str, Any]]:
     base = "https://www.saisonnier.fr"
-    url = base + "/emplois"
-    r = safe_get(url)
+    r = safe_get(base + "/emplois")
     soup = BeautifulSoup(r.text, "lxml")
     offers = []
     for card in soup.select("article, .job-card, li, .job, .search-item"):
         a = card.select_one("a")
         if not a: continue
-        title = a.get_text(strip=True) or "Offre Saisonnier.fr"
-        link = sanitize_link(base, a.get("href", ""))
+        link = sanitize_link(base, a.get("href"))
         if not is_http_url(link): continue
+        title = a.get_text(strip=True) or "Offre Saisonnier.fr"
         desc = card.get_text(" ", strip=True)
         offers.append({"title": title, "employer": "", "city": pick_city_from_text(desc), "link": link, "raw": desc})
     return offers
@@ -300,9 +271,9 @@ def fetch_lhotellerie() -> List[Dict[str, Any]]:
     for card in soup.select("article, .offre, .annonce"):
         a = card.select_one("a")
         if not a: continue
-        title = a.get_text(strip=True) or "Offre Hôtellerie-Restauration"
-        link = sanitize_link(base, a.get("href", ""))
+        link = sanitize_link(base, a.get("href"))
         if not is_http_url(link): continue
+        title = a.get_text(strip=True) or "Offre Hôtellerie-Restauration"
         desc = card.get_text(" ", strip=True)
         offers.append({"title": title, "employer": "", "city": pick_city_from_text(desc), "link": link, "raw": desc})
     return offers
@@ -310,16 +281,15 @@ def fetch_lhotellerie() -> List[Dict[str, Any]]:
 # Jobagri
 def fetch_jobagri() -> List[Dict[str, Any]]:
     base = "https://www.jobagri.com"
-    url = base + "/offres"
-    r = safe_get(url)
+    r = safe_get(base + "/offres")
     soup = BeautifulSoup(r.text, "lxml")
     offers = []
     for card in soup.select("article, .job, .offre, li"):
         a = card.select_one("a")
         if not a: continue
-        title = a.get_text(strip=True) or "Offre Jobagri"
-        link = sanitize_link(base, a.get("href", ""))
+        link = sanitize_link(base, a.get("href"))
         if not is_http_url(link): continue
+        title = a.get_text(strip=True) or "Offre agricole"
         desc = card.get_text(" ", strip=True)
         offers.append({"title": title, "employer": "", "city": pick_city_from_text(desc), "link": link, "raw": desc})
     return offers
@@ -335,45 +305,45 @@ def fetch_adecco() -> List[Dict[str, Any]]:
     for card in soup.select("article, .result-item, li, .job-tile, .offer-card"):
         a = card.select_one("a")
         if not a: continue
-        title = a.get_text(strip=True) or "Offre Adecco"
-        link = sanitize_link(base, a.get("href", ""))
+        link = sanitize_link(base, a.get("href"))
         if not is_http_url(link): continue
+        title = a.get_text(strip=True) or "Offre Adecco"
         desc = card.get_text(" ", strip=True)
         offers.append({"title": title, "employer": "Adecco", "city": pick_city_from_text(desc), "link": link, "raw": desc})
     return offers
 
-# HelloWork
+# HelloWork — URL corrigée
 def fetch_hellowork() -> List[Dict[str, Any]]:
     base = "https://www.hellowork.com"
-    url = base + "/fr-fr/emploi"
-    params = {"k": "saisonnier logement"}
+    url = base + "/fr-fr/emplois"
+    params = {"what": "saisonnier logement", "where": ""}  # FR entière
     r = safe_get(url, params=params)
     soup = BeautifulSoup(r.text, "lxml")
     offers = []
     for card in soup.select("article, .job-card, .search-results__item, li"):
         a = card.select_one("a")
         if not a: continue
-        title = a.get_text(strip=True) or "Offre HelloWork"
-        link = sanitize_link(base, a.get("href", ""))
+        link = sanitize_link(base, a.get("href"))
         if not is_http_url(link): continue
+        title = a.get_text(strip=True) or "Offre HelloWork"
         desc = card.get_text(" ", strip=True)
         offers.append({"title": title, "employer": "", "city": pick_city_from_text(desc), "link": link, "raw": desc})
     return offers
 
-# Meteojob
+# Meteojob — URL corrigée
 def fetch_meteojob() -> List[Dict[str, Any]]:
     base = "https://www.meteojob.com"
     url = base + "/emploi"
-    params = {"q": "saisonnier logement"}
-    r = safe_get(url, params=params)
+    params = {"q": "saisonnier logement", "l": ""}
+    r = safe_get(url, params=params)  # /emploi?q=...
     soup = BeautifulSoup(r.text, "lxml")
     offers = []
     for card in soup.select("article, .jobCard, .search-result, li"):
         a = card.select_one("a")
         if not a: continue
-        title = a.get_text(strip=True) or "Offre Meteojob"
-        link = sanitize_link(base, a.get("href", ""))
+        link = sanitize_link(base, a.get("href"))
         if not is_http_url(link): continue
+        title = a.get_text(strip=True) or "Offre Meteojob"
         desc = card.get_text(" ", strip=True)
         offers.append({"title": title, "employer": "", "city": pick_city_from_text(desc), "link": link, "raw": desc})
     return offers
@@ -389,9 +359,9 @@ def fetch_adzuna_html() -> List[Dict[str, Any]]:
     for card in soup.select("article, .search-result, .job, li"):
         a = card.select_one("a")
         if not a: continue
-        title = a.get_text(strip=True) or "Offre Adzuna"
-        link = sanitize_link(base, a.get("href", ""))
+        link = sanitize_link(base, a.get("href"))
         if not is_http_url(link): continue
+        title = a.get_text(strip=True) or "Offre Adzuna"
         desc = card.get_text(" ", strip=True)
         offers.append({"title": title, "employer": "", "city": pick_city_from_text(desc), "link": link, "raw": desc})
     return offers
@@ -407,9 +377,9 @@ def fetch_jobijoba() -> List[Dict[str, Any]]:
     for card in soup.select("article, .o-card, .result-item, li"):
         a = card.select_one("a")
         if not a: continue
-        title = a.get_text(strip=True) or "Offre Jobijoba"
-        link = sanitize_link(base, a.get("href", ""))
+        link = sanitize_link(base, a.get("href"))
         if not is_http_url(link): continue
+        title = a.get_text(strip=True) or "Offre Jobijoba"
         desc = card.get_text(" ", strip=True)
         offers.append({"title": title, "employer": "", "city": pick_city_from_text(desc), "link": link, "raw": desc})
     return offers
@@ -418,7 +388,7 @@ def fetch_jobijoba() -> List[Dict[str, Any]]:
 def fetch_indeed() -> List[Dict[str, Any]]:
     base = "https://fr.indeed.com"
     url = base + "/jobs"
-    params = {"q": "saisonnier (logé OR logement OR loge) (serveur OR serveuse OR vendange OR cueillette OR plonge)"}
+    params = {"q": "saisonnier (logé OR logement OR loge) (serveur OR serveuse OR barman OR barmaid OR plonge OR vendeur OR vendeuse)"}
     try:
         r = safe_get(url, params=params)
         soup = BeautifulSoup(r.text, "lxml")
@@ -426,9 +396,9 @@ def fetch_indeed() -> List[Dict[str, Any]]:
         for card in soup.select("div.job_seen_beacon, .result, article"):
             title_el = card.select_one("h2 a, a[aria-label]")
             if not title_el: continue
-            title = title_el.get_text(strip=True) or "Offre Indeed"
             link = sanitize_link(base, title_el.get("href", ""))
             if not is_http_url(link): continue
+            title = title_el.get_text(strip=True) or "Offre Indeed"
             desc = card.get_text(" ", strip=True)
             comp = card.select_one(".companyName, .company") or None
             employer = comp.get_text(strip=True) if comp else ""
@@ -492,49 +462,48 @@ def enrich_and_filter(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         city = it.get("city","")
         text_preview = " ".join([title, employer, city, it.get("raw","")]).strip()
 
-        # Filtres sur le listing
-        if requires_training(text_preview): 
-            continue
-        if not experience_ok(text_preview): 
-            continue
+        # 1) Métier-Whitelist : on teste d'abord Titre + Aperçu
+        role_ok = role_allowed(title) or role_allowed(text_preview)
 
-        # Si le rôle n'est pas clairement autorisé, on charge la page détail pour vérifier
         detail_text = ""
-        if not role_allowed(text_preview):
-            try:
-                r = safe_get(link)
-                soup = BeautifulSoup(r.text, "lxml")
-                detail_text = soup.get_text(" ", strip=True)
-            except Exception as e:
-                print(f"[INFO] fetch_page_text failed for {link}: {e}")
+        # 2) Page détail: seulement si rôle pas clair OU besoin d'info exp/diplôme
+        need_detail = (not role_ok)
+        if need_detail:
+            bad_hints = ["alternance", "/entreprise/", "/a-propos", "/contact", "/mentions", "/cgu", "/faq", "/apropos"]
+            if not any(h in link for h in bad_hints):
+                try:
+                    r = safe_get(link)
+                    soup = BeautifulSoup(r.text, "lxml")
+                    detail_text = soup.get_text(" ", strip=True)
+                    role_ok = role_ok or role_allowed(detail_text)
+                except Exception as e:
+                    print(f"[INFO] fetch_page_text failed for {link}: {e}")
 
         check_text = (text_preview + " " + (detail_text or "")).strip()
 
-        # Métier cible
-        if not role_allowed(check_text):
+        # 3) Diplôme / Expérience
+        if requires_training(check_text):
+            continue
+        if not experience_ok(check_text):
             continue
 
-        # Revalidation diplôme/expérience avec le détail
-        if requires_training(check_text): 
-            continue
-        if not experience_ok(check_text): 
+        # 4) Rôle final (strict whitelist)
+        if not role_ok:
             continue
 
-        # Permis
+        # 5) Permis
         requires_permit = bool(mentions_permit(check_text))
 
-        # Ville depuis le détail si absente
+        # 6) Ville & distance
         if not city:
             c2 = pick_city_from_text(check_text)
             if c2: city = c2
-
-        # Distance (si ville géocodable)
         dist_km = 99999
         coords = geocode(city, geo, rate) if city else None
         if coords and origin:
             dist_km = round(haversine_km(origin[0], origin[1], coords[0], coords[1]))
 
-        # Contacts
+        # 7) Contacts
         phone, email = fetch_contact_details(link)
 
         candidates.append({
@@ -546,7 +515,7 @@ def enrich_and_filter(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             "requires_permit": requires_permit
         })
 
-    # Dédup: (titre+employeur+ville)
+    # Dédup avancée (titre+employeur+ville)
     def canon(s: str) -> str:
         return re.sub(r"\s+", " ", (s or "").lower().strip())
 
@@ -569,7 +538,6 @@ def enrich_and_filter(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
     if len(enriched) < MAX_RESULTS:
         print(f"[INFO] Seulement {len(enriched)} offres trouvées après filtrage (seuil min {MAX_RESULTS}).")
-
     return enriched
 
 # -------------------- Email --------------------
@@ -611,14 +579,14 @@ def make_email(offres: List[Dict[str, Any]]) -> tuple[str, str, str]:
             f"</tr>"
         )
 
-    text = "\n".join(lines_txt) if lines_txt else "Aucune offre ne correspond aux filtres aujourd'hui."
+    text = "\n".join(lines_txt) if lines_txt else "Aucune offre ne correspond aux filtres."
     html = f"""
 <!DOCTYPE html>
 <html>
   <body>
     <h2>Offres saisonnières — France entière — Départ: {ORIGIN_CITY}</h2>
-    <p>Sources: France Travail (HTML), HelloWork, Meteojob, Adzuna, Jobijoba, Indeed, Saisonnier.fr, LHR, Jobagri, Adecco.<br/>
-    Règles: pas de diplôme obligatoire, expérience ≤ 1 an, métiers ciblés (service/bar/polyvalent, vente non alimentaire, rayon). Priorité aux offres <strong>sans permis</strong>.</p>
+    <p>Filtres: métiers (whitelist stricte), pas de diplôme obligatoire, expérience ≤ 1 an, priorité aux offres <strong>sans permis</strong>.<br/>
+    Sources: France Travail (HTML), HelloWork, Meteojob, Adzuna, Jobijoba, Indeed, Saisonnier.fr, LHR, Jobagri, Adecco.</p>
     <table style="border-collapse:collapse; width:100%; border:1px solid #ddd;">
       <thead>
         <tr style="background:#f5f5f5;">
