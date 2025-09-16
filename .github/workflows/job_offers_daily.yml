@@ -4,13 +4,12 @@ on:
   workflow_dispatch:
     inputs:
       search_terms:
-        description: "Mots-clés prioritaires (ex: serveur logé, vendanges logé, aide barman, runner)"
+        description: "Mots-clés (ex: serveur logé, aide barman logé, runner logé, vendanges logé)"
         type: string
         required: true
         default: "serveur logé, aide barman logé, runner logé, vendanges logé, ouvrier cave logé, aide caviste logé, employé polyvalent logé, cueilleur logé"
-
   schedule:
-    # GitHub Actions est en UTC. 09:00 Europe/Paris = 07:00 UTC (été) ou 08:00 UTC (hiver)
+    # 09:00 Europe/Paris = 07:00 UTC (été) et 08:00 UTC (hiver)
     - cron: "0 7 * * *"
     - cron: "0 8 * * *"
 
@@ -34,7 +33,8 @@ jobs:
       - name: Install deps
         run: |
           python -m pip install --upgrade pip
-          pip install requests beautifulsoup4 lxml html5lib openai==1.51.0
+          pip install "httpx<0.28"
+          pip install requests beautifulsoup4 lxml html5lib "openai==1.51.0"
 
       - name: Guard 09:00 Europe/Paris (éviter les doublons)
         env:
@@ -42,15 +42,10 @@ jobs:
         run: |
           NOW_HOUR="$(date +'%H')"
           if [ "$GITHUB_EVENT_NAME" = "schedule" ] && [ "$NOW_HOUR" != "09" ]; then
-            echo "Skipping, current hour: $NOW_HOUR (waiting 09:00 Europe/Paris)"
+            echo "Skipping, current hour: $NOW_HOUR (target 09:00 Europe/Paris)"
             exit 0
           fi
-    
 
-
-      # ------------------------------
-      # Fichier des sites à scanner
-      # ------------------------------
       - name: Write sites.json
         run: |
           printf '%s\n' \
@@ -59,9 +54,6 @@ jobs:
           ']' > sites.json
           cat sites.json
 
-      # ------------------------------
-      # Fichier des filtres pour GPT
-      # ------------------------------
       - name: Write filters.json
         run: |
           printf '%s\n' \
@@ -81,96 +73,46 @@ jobs:
           '}' > filters.json
           cat filters.json
 
-      # ------------------------------
-      # Script de collecte brute
-      # ------------------------------
       - name: Write fetch_sites.py
         run: |
           printf '%s\n' \
           'import json, os, requests' \
-          'from bs4 import BeautifulSoup' \
-          '' \
           'SITES = json.load(open("sites.json","r",encoding="utf-8"))' \
           'TERMS = os.getenv("SEARCH_TERMS","").strip() or "${{ github.event.inputs.search_terms }}"' \
-          '' \
           'def q(s): return requests.utils.quote(s)' \
-          '' \
-          '# Fonctions simples pour générer des URLs de recherche' \
-          'def results_indeed(terms):' \
-          '  return [{"source":"indeed","url":f"https://fr.indeed.com/jobs?q={q(terms)}+log%C3%A9&l=France","title":"Indeed search: "+terms}]' \
-          '' \
-          'def results_hellowork(terms):' \
-          '  return [{"source":"hellowork","url":f"https://www.hellowork.com/fr-fr/emploi/recherche.html?k={q(terms)}+logement","title":"HelloWork search: "+terms}]' \
-          '' \
-          'def results_monster(terms):' \
-          '  return [{"source":"monster","url":f"https://www.monster.fr/emploi/recherche/?q={q(terms)}&where=France","title":"Monster search: "+terms}]' \
-          '' \
-          'def results_francetravail(terms):' \
-          '  return [{"source":"francetravail","url":f"https://candidat.francetravail.fr/offres/recherche?k={q(terms)}&l=France","title":"France Travail search: "+terms}]' \
-          '' \
-          'def results_simple(engine, terms):' \
-          '  return [{"source":engine,"url":f"https://www.google.com/search?q=site%3A{engine}.com+{q(terms)}+log%C3%A9+France","title":engine+" via Google"}]' \
-          '' \
-          'DISPATCH = {' \
-          '  "indeed": results_indeed,' \
-          '  "hellowork": results_hellowork,' \
-          '  "monster": results_monster,' \
-          '  "francetravail": results_francetravail' \
-          '}' \
-          '' \
-          'raw = []' \
-          'terms_list = [t.strip() for t in TERMS.split(",") if t.strip()]' \
-          'if not terms_list:' \
-          '  terms_list = ["serveur logé","aide barman logé","runner logé","vendanges logé","ouvrier cave logé","aide caviste logé","employé polyvalent logé","cueilleur logé"]' \
-          '' \
+          'def results_indeed(t): return [{"source":"indeed","url":f"https://fr.indeed.com/jobs?q={q(t)}+log%C3%A9&l=France","title":"Indeed search: "+t}]' \
+          'def results_hellowork(t): return [{"source":"hellowork","url":f"https://www.hellowork.com/fr-fr/emploi/recherche.html?k={q(t)}+logement","title":"HelloWork search: "+t}]' \
+          'def results_monster(t): return [{"source":"monster","url":f"https://www.monster.fr/emploi/recherche/?q={q(t)}&where=France","title":"Monster search: "+t}]' \
+          'def results_francetravail(t): return [{"source":"francetravail","url":f"https://candidat.francetravail.fr/offres/recherche?k={q(t)}&l=France","title":"France Travail search: "+t}]' \
+          'def results_simple(engine, t): return [{"source":engine,"url":f"https://www.google.com/search?q=site%3A{engine}.com+{q(t)}+log%C3%A9+France","title":engine+" via Google"}]' \
+          'DISPATCH = {"indeed":results_indeed,"hellowork":results_hellowork,"monster":results_monster,"francetravail":results_francetravail}' \
+          'raw=[]' \
+          'terms=[x.strip() for x in TERMS.split(",") if x.strip()] or ["serveur logé","aide barman logé","runner logé","vendanges logé","ouvrier cave logé","aide caviste logé","employé polyvalent logé","cueilleur logé"]' \
           'for site in SITES:' \
-          '  for t in terms_list:' \
-          '    fn = DISPATCH.get(site)' \
-          '    if fn:' \
-          '      raw.extend(fn(t))' \
-          '    else:' \
-          '      raw.extend(results_simple(site, t))' \
-          '' \
+          '  for t in terms:' \
+          '    fn=DISPATCH.get(site)' \
+          '    raw.extend(fn(t) if fn else results_simple(site,t))' \
           'json.dump(raw, open("offers_raw.json","w",encoding="utf-8"), ensure_ascii=False, indent=2)' \
-          'print(f"Collected seeds: {len(raw)}")' \
+          'print("Collected seeds:", len(raw))' \
           > fetch_sites.py
           python fetch_sites.py
 
-      # ------------------------------
-      # GPT-5 mini : filtrage intelligent
-      # ------------------------------
       - name: Write filter_with_gpt.py
         run: |
           printf '%s\n' \
           'import json, os' \
           'from openai import OpenAI' \
-          '' \
-          'client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))' \
+          'client = OpenAI()' \
           'model = os.getenv("OPENAI_MODEL","gpt-4o-mini")' \
           'temperature = float(os.getenv("OPENAI_TEMPERATURE","1"))' \
-          '' \
           'offers = json.load(open("offers_raw.json","r",encoding="utf-8"))' \
           'filters = json.load(open("filters.json","r",encoding="utf-8"))' \
-          '' \
-          'prompt = {' \
-          '  "role":"system",' \
-          '  "content": "Tu es un assistant qui filtre des offres d\\u0027emploi. Ne supprime aucune offre. Classe et annote chaque entrée avec un score basé sur logement>lieu>durée>métier. Réponds en JSON."}' \
-          '' \
-          'resp = client.chat.completions.create(' \
-          '  model=model,' \
-          '  temperature=temperature,' \
-          '  messages=[' \
-          '    prompt,' \
-          '    {"role":"user","content": json.dumps({"filters": filters, "offers": offers}, ensure_ascii=False)}' \
-          '  ]' \
-          ')' \
-          '' \
+          'sys_prompt = {"role":"system","content":"Tu filtres des offres. Ne supprime rien. Classe et annote avec un score basé sur logement>lieu (métropole sans Corse/DOM-COM)>durée (7-92j)>métier. Réponds JSON {offers:[...] }."}' \
+          'user_payload = {"filters":filters,"offers":offers}' \
+          'resp = client.chat.completions.create(model=model,temperature=temperature,messages=[sys_prompt,{"role":"user","content":json.dumps(user_payload,ensure_ascii=False)}])' \
           'content = resp.choices[0].message.content' \
-          'try:' \
-          '  data = json.loads(content)' \
-          'except Exception:' \
-          '  data = {"offers": offers, "raw_response": content}' \
-          '' \
+          'try: data = json.loads(content)' \
+          'except Exception: data = {"offers": offers, "raw_response": content}' \
           'json.dump(data, open("offers_filtered.json","w",encoding="utf-8"), ensure_ascii=False, indent=2)' \
           'print("Filtered summary written.")' \
           > filter_with_gpt.py
@@ -180,25 +122,19 @@ jobs:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: python filter_with_gpt.py
 
-      # ------------------------------
-      # Génération et envoi du rapport
-      # ------------------------------
       - name: Write email_report.py
         run: |
           printf '%s\n' \
           'import os, smtplib, json' \
           'from email.mime.multipart import MIMEMultipart' \
           'from email.mime.text import MIMEText' \
-          '' \
           'RECIPIENT = os.getenv("RECIPIENT_EMAIL")' \
           'SENDER = os.getenv("SENDER_EMAIL")' \
           'SMTP_HOST = os.getenv("SMTP_HOST")' \
           'SMTP_PORT = int(os.getenv("SMTP_PORT"))' \
           'SMTP_USER = os.getenv("SMTP_USER")' \
           'SMTP_PASS = os.getenv("SMTP_PASS")' \
-          '' \
           'data = json.load(open("offers_filtered.json","r",encoding="utf-8"))' \
-          '' \
           'html = ["<h2>Offres saisonnières - Rapport</h2>","<ol>"]' \
           'items = data.get("offers", [])' \
           'for item in items[:200]:' \
@@ -206,19 +142,18 @@ jobs:
           '  url = item.get("url","#")' \
           '  score = item.get("score","?")' \
           '  source = item.get("source","?")' \
-          '  html.append(f"<li><b>{title}</b> - {source} - Score: {score} - <a href=\\"{url}\\">Lien</a></li>")' \
+          '  note = item.get("note","")' \
+          '  html.append(f"<li><b>{title}</b> - {source} - Score: {score} - <a href=\\"{url}\\">Lien</a> - {note}</li>")' \
           'html.append("</ol>")' \
-          '' \
           'msg = MIMEMultipart("alternative")' \
-          'msg["Subject"] = "Veille offres saisonnières"' \
+          'msg["Subject"] = "Veille offres saisonnières (agrégées + annotées)"' \
           'msg["From"] = SENDER' \
           'msg["To"] = RECIPIENT' \
           'msg.attach(MIMEText("\\n".join(html), "html", "utf-8"))' \
-          '' \
           'with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as s:' \
           '  s.starttls()' \
           '  s.login(SMTP_USER, SMTP_PASS)' \
-          '  s.sendmail(SENDER, RECIPIENT.split(","), msg.as_string())' \
+          '  s.sendmail(SENDER, [x.strip() for x in RECIPIENT.split(",") if x.strip()], msg.as_string())' \
           'print("Email sent to", RECIPIENT)' \
           > email_report.py
 
@@ -232,9 +167,6 @@ jobs:
           SMTP_PASS: ${{ secrets.SMTP_PASS }}
         run: python email_report.py
 
-      # ------------------------------
-      # Sauvegarde des fichiers générés
-      # ------------------------------
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
