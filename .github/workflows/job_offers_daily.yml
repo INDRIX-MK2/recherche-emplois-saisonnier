@@ -109,7 +109,7 @@ jobs:
           > fetch_sites.py
           python fetch_sites.py
 
-      # -------------- ÉTAPE 1bis: Téléchargement HTML (brut, sans scraping fin) --------------
+      # -------------- ÉTAPE 1bis: Téléchargement HTML (brut) --------------
       - name: Write fetch_html.py
         run: |
           printf '%s\n' \
@@ -144,7 +144,7 @@ jobs:
           'session = requests.Session()' \
           'out = []' \
           '' \
-          'MAX_HTML = 200000' \
+          'MAX_HTML = 120000' \
           '' \
           'for i, it in enumerate(offers, start=1):' \
           '    url = it.get("url","")' \
@@ -161,18 +161,19 @@ jobs:
           > fetch_html.py
           python fetch_html.py
 
-      # -------------- ÉTAPE 2: Extraction/Scoring par GPT-5-mini (à partir du HTML) --------------
+      # -------------- ÉTAPE 2: Extraction/Scoring par GPT-5-mini (HTML segmenté) --------------
       - name: Write filter_with_gpt.py
         run: |
           printf '%s\n' \
-          'import json, os' \
+          'import json, os, time, re' \
           'import backoff, httpx' \
           'from openai import OpenAI' \
           'from openai import APIConnectionError, RateLimitError, APIStatusError, APITimeoutError' \
           '' \
           'MODEL = os.getenv("OPENAI_MODEL","gpt-5-mini")' \
           'TEMP = float(os.getenv("OPENAI_TEMPERATURE","1"))' \
-          'CHUNK_SIZE = int(os.getenv("OPENAI_CHUNK_SIZE","25"))' \
+          'SEG_CHARS = 12000' \
+          'SLEEP_BETWEEN_CALLS = 0.6' \
           '' \
           'API_KEY = os.getenv("OPENAI_API_KEY")' \
           'if not API_KEY:' \
@@ -182,11 +183,35 @@ jobs:
           'pages = json.load(open("offers_pages.json","r",encoding="utf-8"))' \
           'filters = json.load(open("filters.json","r",encoding="utf-8"))' \
           '' \
-          'sys_prompt = {"role":"system","content": """Tu recois des pages HTML de resultats ou de listes d offres.' \
-          'Parser le HTML fourni pour extraire plusieurs offres individuelles par page, sans inventer.' \
-          'Pour chaque offre, retourner: title, source, url, offer_id, employer_email, score, note.' \
-          'Scoring 0-100 (ordre d importance): logement disponible, localisation France metropolitaine (hors Corse et DOM COM), duree 7-92 jours, metier autorise (serveur, serveuse, runner, aide de salle, aide barman, commis de bar, vendangeur, porteuse, porteur, trieur, ouvrier agricole polyvalent, ouvrier de cave, aide caviste, employe polyvalent, employé polyvalent, cueilleur, cueilleuse).' \
-          'Sortie demandee: JSON strict {"offers":[{...}]}."""}' \
+          'def squeeze_ws(s):' \
+          '    try:' \
+          '        return re.sub("\\s+", " ", s).strip()' \
+          '    except Exception:' \
+          '        return s' \
+          '' \
+          'def split_segments(text, max_chars):' \
+          '    text = squeeze_ws(text or "")' \
+          '    if len(text) <= max_chars:' \
+          '        return [text]' \
+          '    segs = []' \
+          '    i = 0' \
+          '    while i < len(text):' \
+          '        segs.append(text[i:i+max_chars])' \
+          '        i += max_chars' \
+          '    return segs' \
+          '' \
+          'sys_prompt = {"role":"system","content": """Tu recois un segment de HTML provenant d une page de resultats ou de liste d offres.' \
+          'Extraire autant d offres pertinentes que possible depuis ce segment uniquement sans inventer.' \
+          'Pour chaque offre:' \
+          '- title: titre de l offre' \
+          '- source: nom du site d origine' \
+          '- url: lien direct si visible sinon "#"' \
+          '- offer_id: identifiant si visible sinon vide' \
+          '- employer_email: email si visible sinon vide' \
+          '- score: 0-100 selon logement disponible priorite, localisation France metropolitaine hors Corse et DOM COM, duree 7-92 jours, metier autorise' \
+          '- note: justification courte' \
+          'Sortie JSON strict {"offers":[{...}]}.' \
+          'Ne retourner au maximum que 40 items par segment."""}' \
           '' \
           '@backoff.on_exception(' \
           '  backoff.expo,' \
@@ -199,32 +224,53 @@ jobs:
           '    model=MODEL,' \
           '    temperature=TEMP,' \
           '    response_format={"type":"json_object"},' \
+          '    max_tokens=2500,' \
           '    messages=[' \
           '      sys_prompt,' \
           '      {"role":"user","content": json.dumps(payload, ensure_ascii=False)}' \
           '    ]' \
           '  )' \
           '' \
-          'def chunks(lst, n):' \
-          '  for i in range(0, len(lst), n):' \
-          '    yield lst[i:i+n]' \
+          'def dedup(offers):' \
+          '  out, seen = [], set()' \
+          '  for it in offers:' \
+          '    title = (it.get("title","") or "").strip().lower()' \
+          '    source = (it.get("source","") or "").strip().lower()' \
+          '    oid = (it.get("offer_id","") or "").strip().lower()' \
+          '    url = (it.get("url","") or "").split("?")[0].strip().lower()' \
+          '    key = oid or url or (title + "|" + source)' \
+          '    if key and key not in seen:' \
+          '      seen.add(key)' \
+          '      out.append(it)' \
+          '  return out' \
           '' \
           'aggregated = []' \
-          'for idx, part in enumerate(chunks(pages, CHUNK_SIZE), start=1):' \
-          '  payload = {"filters": filters, "pages": part}' \
-          '  resp = call_openai(payload)' \
-          '  content = resp.choices[0].message.content' \
-          '  try:' \
-          '    data = json.loads(content)' \
-          '    part_offers = data.get("offers", [])' \
-          '  except Exception:' \
-          '    part_offers = [{"title":"(parse error)","source":"gpt","url":"#","note":"Reponse non JSON","score":0}]' \
-          '  aggregated.extend(part_offers)' \
-          '  print(f"Chunk {idx}: +{len(part_offers)} items")' \
+          'total_calls = 0' \
           '' \
+          'for p_idx, page in enumerate(pages, start=1):' \
+          '  src = page.get("source","")' \
+          '  url = page.get("url","")' \
+          '  title = page.get("title","")' \
+          '  html = page.get("html","")' \
+          '  segments = split_segments(html, SEG_CHARS)' \
+          '  for s_idx, seg in enumerate(segments, start=1):' \
+          '    payload = {"filters": filters, "page_meta": {"source": src, "url": url, "title": title, "segment_index": s_idx, "total_segments": len(segments)}, "html_segment": seg}' \
+          '    resp = call_openai(payload)' \
+          '    total_calls += 1' \
+          '    content = resp.choices[0].message.content' \
+          '    try:' \
+          '      data = json.loads(content)' \
+          '      part = data.get("offers", [])' \
+          '    except Exception:' \
+          '      part = [{"title":"(parse error)", "source":"gpt", "url":"#", "note":"Reponse non JSON", "score":0}]' \
+          '    aggregated.extend(part)' \
+          '    print(f"Page {p_idx}/{len(pages)} seg {s_idx}/{len(segments)}: +{len(part)} items")' \
+          '    time.sleep(SLEEP_BETWEEN_CALLS)' \
+          '' \
+          'aggregated = dedup(aggregated)' \
           'out = {"offers": aggregated}' \
           'json.dump(out, open("offers_filtered.json","w",encoding="utf-8"), ensure_ascii=False, indent=2)' \
-          'print("Done. Total items:", len(aggregated))' \
+          'print("Done. Total items:", len(aggregated), " API calls:", total_calls)' \
           > filter_with_gpt.py
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
@@ -282,9 +328,9 @@ jobs:
           '    if mail:' \
           '        extra.append("Contact: <a href=&quot;mailto:{0}&quot;>{0}</a>".format(mail))' \
           '' \
-          '    extra_html = " — ".join(extra)' \
+          '    extra_html = " - ".join(extra)' \
           '    if extra_html:' \
-          '        extra_html = " — " + extra_html' \
+          '        extra_html = " - " + extra_html' \
           '' \
           '    html.append("<li><b>{0}</b> - {1} - Score: {2}{3} - <a href=&quot;{4}&quot;>Lien</a> - {5}</li>".format(title, source, score, extra_html, url, note))' \
           '' \
