@@ -186,7 +186,7 @@ jobs:
           '  score = item.get("score","?")' \
           '  source = item.get("source","?")' \
           '  note = item.get("note","")' \
-          '  html.append(f"<li><b>{title}</b> - {source} - Score: {score} - <a href=\\"{url}\\">Lien</a> - {note}</li>")' \
+          "  html.append(f\"<li><b>{title}</b> - {source} - Score: {score} - <a href='{url}'>Lien</a> - {note}</li>\")" \
           'html.append("</ol>")' \
           '' \
           'msg = MIMEMultipart("alternative")' \
@@ -201,6 +201,7 @@ jobs:
           '  s.sendmail(SENDER, [x.strip() for x in RECIPIENT.split(",") if x.strip()], msg.as_string())' \
           'print("Email sent to", RECIPIENT)' \
           > email_report.py
+
 
       - name: Send email
         env:
