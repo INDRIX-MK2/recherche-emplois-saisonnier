@@ -52,7 +52,7 @@ jobs:
         run: |
           printf '%s\n' \
           '[' \
-          '  "francetravail","indeed","hellowork","monster","jobijoba","meteojob","keljob","adzuna","alljobs","jora","jobted","linkedin","google_jobs","apec","cadremploi","wttj","lesjeudis","jobteaser","jobsthatsense","chooseyourboss","leboncoin","manpower","ouestjob"' \
+          '  "francetravail","indeed","hellowork","jobijoba","meteojob","keljob","adzuna","alljobs","jora","jobted","linkedin","google_jobs","apec","wttj","lesjeudis","jobteaser","jobsthatsense","chooseyourboss","leboncoin","manpower","ouestjob"' \
           ']' > sites.json
           cat sites.json
 
@@ -82,12 +82,11 @@ jobs:
           'SITES = json.load(open("sites.json","r",encoding="utf-8"))' \
           'TERMS = os.getenv("SEARCH_TERMS","").strip() or "${{ github.event.inputs.search_terms }}"' \
           'def q(s): return requests.utils.quote(s)' \
-          'def results_indeed(t): return [{"source":"indeed","url":f"https://fr.indeed.com/jobs?q={q(t)}+log%C3%A9&l=France","title":"Indeed search: "+t}]' \
-          'def results_hellowork(t): return [{"source":"hellowork","url":f"https://www.hellowork.com/fr-fr/emploi/recherche.html?k={q(t)}+logement","title":"HelloWork search: "+t}]' \
-          'def results_monster(t): return [{"source":"monster","url":f"https://www.monster.fr/emploi/recherche/?q={q(t)}&where=France","title":"Monster search: "+t}]' \
-          'def results_francetravail(t): return [{"source":"francetravail","url":f"https://candidat.francetravail.fr/offres/recherche?k={q(t)}&l=France","title":"France Travail search: "+t}]' \
+          'def results_indeed(t): return [{"source":"indeed","url":f"https://fr.indeed.com/jobs?q={q(t)}+log%C3%A9&l=France","title":"Indeed: "+t}]' \
+          'def results_hellowork(t): return [{"source":"hellowork","url":f"https://www.hellowork.com/fr-fr/emploi/recherche.html?k={q(t)}+logement","title":"HelloWork: "+t}]' \
+          'def results_francetravail(t): return [{"source":"francetravail","url":f"https://candidat.francetravail.fr/offres/recherche?k={q(t)}&l=France","title":"France Travail: "+t}]' \
           'def results_simple(engine, t): return [{"source":engine,"url":f"https://www.google.com/search?q=site%3A{engine}.com+{q(t)}+log%C3%A9+France","title":engine+" via Google"}]' \
-          'DISPATCH = {"indeed":results_indeed,"hellowork":results_hellowork,"monster":results_monster,"francetravail":results_francetravail}' \
+          'DISPATCH = {"indeed":results_indeed,"hellowork":results_hellowork,"francetravail":results_francetravail}' \
           'raw=[]' \
           'terms=[x.strip() for x in TERMS.split(",") if x.strip()] or ["serveur logé","aide barman logé","runner logé","vendanges logé","ouvrier cave logé","aide caviste logé","employé polyvalent logé","cueilleur logé"]' \
           'for site in SITES:' \
