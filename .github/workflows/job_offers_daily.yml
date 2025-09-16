@@ -4,12 +4,12 @@ on:
   workflow_dispatch:
     inputs:
       search_terms:
-        description: "Mots-clés pour la recherche (ex: serveur logé, aide barman logé, vendanges logé)"
+        description: "Mots-cles pour la recherche (ex: serveur loge, aide barman loge, vendanges loge)"
         type: string
         required: true
-        default: "serveur logé, aide barman logé, runner logé, vendanges logé, ouvrier cave logé, aide caviste logé, employé polyvalent logé, cueilleur logé"
+        default: "serveur loge, aide barman loge, runner loge, vendanges loge, ouvrier cave loge, aide caviste loge, employe polyvalent loge, cueilleur loge"
 
-  # 09:00 Europe/Paris = 07:00 UTC (été) et 08:00 UTC (hiver)
+  # 09:00 Europe/Paris = 07:00 UTC (ete) et 08:00 UTC (hiver)
   schedule:
     - cron: "0 7 * * *"
     - cron: "0 8 * * *"
@@ -38,7 +38,7 @@ jobs:
           pip install "httpx<0.28"
           pip install requests beautifulsoup4 lxml html5lib backoff "openai==1.51.0"
 
-      - name: Guard 09:00 Europe/Paris (éviter les doublons)
+      - name: Guard 09:00 Europe/Paris (eviter les doublons)
         env:
           GITHUB_EVENT_NAME: ${{ github.event_name }}
         run: |
@@ -70,13 +70,13 @@ jobs:
           '  "allowed_jobs": [' \
           '    "serveur","serveuse","runner","aide de salle","aide barman","commis de bar",' \
           '    "vendangeur","porteuse","porteur","trieur","ouvrier agricole polyvalent",' \
-          '    "ouvrier de cave","aide caviste","employe polyvalent","employé polyvalent",' \
+          '    "ouvrier de cave","aide caviste","employe polyvalent","employe polyvalent",' \
           '    "cueilleur","cueilleuse"' \
           '  ]' \
           '}' > filters.json
           cat filters.json
 
-      # -------------- ÉTAPE 1: URLs de recherche (seed) --------------
+      # -------------- ETAPE 1: URLs de recherche (seed) --------------
       - name: Write fetch_sites.py
         env:
           SEARCH_TERMS: ${{ github.event.inputs.search_terms }}
@@ -86,7 +86,7 @@ jobs:
           'SITES = json.load(open("sites.json","r",encoding="utf-8"))' \
           'TERMS = os.getenv("SEARCH_TERMS","").strip()' \
           'if not TERMS:' \
-          '    TERMS = "serveur logé, aide barman logé, runner logé, vendanges logé, ouvrier cave logé, aide caviste logé, employé polyvalent logé, cueilleur logé"' \
+          '    TERMS = "serveur loge, aide barman loge, runner loge, vendanges loge, ouvrier cave loge, aide caviste loge, employe polyvalent loge, cueilleur loge"' \
           'def q(s): return requests.utils.quote(s)' \
           '' \
           'def results_indeed(t): return [{"source":"indeed","url":f"https://fr.indeed.com/jobs?q={q(t)}&l=France","title":"Indeed search: "+t}]' \
@@ -98,7 +98,7 @@ jobs:
           'DISPATCH = {"indeed":results_indeed,"hellowork":results_hellowork,"monster":results_monster,"francetravail":results_francetravail}' \
           '' \
           'raw=[]' \
-          'terms=[x.strip() for x in TERMS.split(",") if x.strip()] or ["serveur","aide barman","runner","vendanges","ouvrier cave","aide caviste","employé polyvalent","cueilleur"]' \
+          'terms=[x.strip() for x in TERMS.split(",") if x.strip()] or ["serveur","aide barman","runner","vendanges","ouvrier cave","aide caviste","employe polyvalent","cueilleur"]' \
           'for site in SITES:' \
           '  for t in terms:' \
           '    fn = DISPATCH.get(site)' \
@@ -109,11 +109,13 @@ jobs:
           > fetch_sites.py
           python fetch_sites.py
 
-      # -------------- ÉTAPE 1bis: Téléchargement HTML (brut) --------------
+      # -------------- ETAPE 1bis: Telechargement HTML (brut) --------------
       - name: Write fetch_html.py
+        env:
+          MAX_PAGES: "120"
         run: |
           printf '%s\n' \
-          'import json, re, requests, time' \
+          'import json, re, requests, time, os' \
           '' \
           'HEADERS = {' \
           '  "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",' \
@@ -133,36 +135,47 @@ jobs:
           'def fetch(url, session, timeout=25):' \
           '    try:' \
           '        r = session.get(url, headers=HEADERS, timeout=timeout, allow_redirects=True)' \
-          '        status = r.status_code' \
-          '        txt = r.text or ""' \
+          '        return r.status_code, (r.text or "")' \
           '    except Exception as e:' \
-          '        status = 0' \
-          '        txt = str(e)' \
-          '    return status, txt' \
+          '        return 0, str(e)' \
           '' \
           'offers = json.load(open("offers_raw.json","r",encoding="utf-8"))' \
           'session = requests.Session()' \
           'out = []' \
-          '' \
           'MAX_HTML = 120000' \
+          'try:' \
+          '    MAX_PAGES = int(os.getenv("MAX_PAGES","0"))' \
+          'except Exception:' \
+          '    MAX_PAGES = 0' \
           '' \
-          'for i, it in enumerate(offers, start=1):' \
+          'http_stats = {}' \
+          'count = 0' \
+          'for it in offers:' \
+          '    count += 1' \
+          '    if MAX_PAGES and count > MAX_PAGES:' \
+          '        break' \
           '    url = it.get("url","")' \
           '    source = it.get("source","")' \
           '    title = it.get("title","")' \
           '    status, html = fetch(url, session)' \
+          '    http_stats[status] = http_stats.get(status,0) + 1' \
           '    cleaned = strip_js_css(html)[:MAX_HTML]' \
           '    out.append({"source":source,"title":title,"url":url,"status":status,"html":cleaned})' \
-          '    if i % 10 == 0:' \
+          '    if count % 10 == 0:' \
           '        time.sleep(1)' \
           '' \
           'json.dump(out, open("offers_pages.json","w",encoding="utf-8"), ensure_ascii=False, indent=2)' \
           'print("Fetched pages:", len(out))' \
+          'print("HTTP status stats:", http_stats)' \
           > fetch_html.py
           python fetch_html.py
 
-      # -------------- ÉTAPE 2: Extraction/Scoring par GPT-5-mini (HTML segmenté) --------------
+      # -------------- ETAPE 2: Extraction/Scoring GPT-5-mini (HTML segmente) --------------
       - name: Write filter_with_gpt.py
+        env:
+          SEG_CHARS: "12000"
+          SLEEP_BETWEEN_CALLS: "0.6"
+          MAX_COMPLETION_TOKENS: "2500"
         run: |
           printf '%s\n' \
           'import json, os, time, re' \
@@ -172,8 +185,9 @@ jobs:
           '' \
           'MODEL = os.getenv("OPENAI_MODEL","gpt-5-mini")' \
           'TEMP = float(os.getenv("OPENAI_TEMPERATURE","1"))' \
-          'SEG_CHARS = 12000' \
-          'SLEEP_BETWEEN_CALLS = 0.6' \
+          'SEG_CHARS = int(os.getenv("SEG_CHARS","12000"))' \
+          'SLEEP_BETWEEN_CALLS = float(os.getenv("SLEEP_BETWEEN_CALLS","0.6"))' \
+          'MAX_COMPLETION_TOKENS = int(os.getenv("MAX_COMPLETION_TOKENS","2500"))' \
           '' \
           'API_KEY = os.getenv("OPENAI_API_KEY")' \
           'if not API_KEY:' \
@@ -224,7 +238,7 @@ jobs:
           '    model=MODEL,' \
           '    temperature=TEMP,' \
           '    response_format={"type":"json_object"},' \
-          '    max_tokens=2500,' \
+          '    max_completion_tokens=MAX_COMPLETION_TOKENS,' \
           '    messages=[' \
           '      sys_prompt,' \
           '      {"role":"user","content": json.dumps(payload, ensure_ascii=False)}' \
@@ -255,7 +269,11 @@ jobs:
           '  segments = split_segments(html, SEG_CHARS)' \
           '  for s_idx, seg in enumerate(segments, start=1):' \
           '    payload = {"filters": filters, "page_meta": {"source": src, "url": url, "title": title, "segment_index": s_idx, "total_segments": len(segments)}, "html_segment": seg}' \
-          '    resp = call_openai(payload)' \
+          '    try:' \
+          '      resp = call_openai(payload)' \
+          '    except RateLimitError:' \
+          '      time.sleep(max(SLEEP_BETWEEN_CALLS*3, 2.0))' \
+          '      resp = call_openai(payload)' \
           '    total_calls += 1' \
           '    content = resp.choices[0].message.content' \
           '    try:' \
@@ -272,15 +290,13 @@ jobs:
           'json.dump(out, open("offers_filtered.json","w",encoding="utf-8"), ensure_ascii=False, indent=2)' \
           'print("Done. Total items:", len(aggregated), " API calls:", total_calls)' \
           > filter_with_gpt.py
-        env:
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
 
       - name: Run filtering (GPT-5 mini)
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: python filter_with_gpt.py
 
-      # -------------- ÉTAPE 3: Email HTML (destinataires en dur) --------------
+      # -------------- ETAPE 3: Email HTML (destinataires en dur) --------------
       - name: Write email_report.py
         run: |
           printf '%s\n' \
