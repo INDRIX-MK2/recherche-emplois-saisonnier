@@ -176,16 +176,32 @@ jobs:
       - name: Write email_report.py
         run: |
           printf '%s\n' \
-          'import os, smtplib, json' \
+          'import os, smtplib, json, sys' \
           'from email.mime.multipart import MIMEMultipart' \
           'from email.mime.text import MIMEText' \
           '' \
-          'RECIPIENT = os.getenv("RECIPIENT_EMAIL")' \
-          'SENDER = os.getenv("SENDER_EMAIL")' \
-          'SMTP_HOST = os.getenv("SMTP_HOST")' \
-          'SMTP_PORT = int(os.getenv("SMTP_PORT"))' \
-          'SMTP_USER = os.getenv("SMTP_USER")' \
-          'SMTP_PASS = os.getenv("SMTP_PASS")' \
+          'RECIPIENT = os.getenv("RECIPIENT_EMAIL") or ""' \
+          'SENDER = os.getenv("SENDER_EMAIL") or ""' \
+          'SMTP_HOST = os.getenv("SMTP_HOST") or ""' \
+          'SMTP_PORT_RAW = os.getenv("SMTP_PORT") or ""' \
+          'SMTP_USER = os.getenv("SMTP_USER") or ""' \
+          'SMTP_PASS = os.getenv("SMTP_PASS") or ""' \
+          '' \
+          'try:' \
+          '    SMTP_PORT = int(SMTP_PORT_RAW)' \
+          'except Exception:' \
+          '    print("ERROR: SMTP_PORT invalid or missing:", repr(SMTP_PORT_RAW))' \
+          '    sys.exit(1)' \
+          '' \
+          'missing = [k for k,v in {"RECIPIENT_EMAIL":RECIPIENT,"SMTP_HOST":SMTP_HOST,"SMTP_PORT":SMTP_PORT_RAW,"SMTP_USER":SMTP_USER,"SMTP_PASS":"***"}.items() if not v]' \
+          'if missing:' \
+          '    print("ERROR: Missing required envs:", missing)' \
+          '    sys.exit(1)' \
+          '' \
+          '# Envelope sender doit correspondre au compte authentifie' \
+          'ENVELOPE_FROM = SMTP_USER' \
+          'if not SENDER:' \
+          '    SENDER = SMTP_USER' \
           '' \
           'data = json.load(open("offers_filtered.json","r",encoding="utf-8"))' \
           '' \
@@ -217,15 +233,46 @@ jobs:
           'msg["Subject"] = "Veille offres saisonnieres enrichie (GPT-5-mini)"' \
           'msg["From"] = SENDER' \
           'msg["To"] = RECIPIENT' \
+          'msg["Reply-To"] = SENDER' \
           'msg.attach(MIMEText("\\n".join(html), "html", "utf-8"))' \
           '' \
-          'with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as s:' \
-          '    s.starttls()' \
-          '    s.login(SMTP_USER, SMTP_PASS)' \
-          '    s.sendmail(SENDER, [x.strip() for x in RECIPIENT.split(",") if x.strip()], msg.as_string())' \
-          'print("Email sent to", RECIPIENT)' \
+          'recipients = [x.strip() for x in RECIPIENT.split(",") if x.strip()]' \
+          'if not recipients:' \
+          '    print("ERROR: No recipients parsed from RECIPIENT_EMAIL")' \
+          '    sys.exit(1)' \
+          '' \
+          'use_ssl = (SMTP_PORT == 465)' \
+          'print("SMTP debug: host={0} port={1} ssl={2} sender={3} to={4}".format(SMTP_HOST, SMTP_PORT, use_ssl, SENDER, recipients))' \
+          '' \
+          'try:' \
+          '    if use_ssl:' \
+          '        server = smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, timeout=60)' \
+          '    else:' \
+          '        server = smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=60)' \
+          '    server.set_debuglevel(1)' \
+          '    if not use_ssl:' \
+          '        server.ehlo()' \
+          '        server.starttls()' \
+          '        server.ehlo()' \
+          '    server.login(SMTP_USER, SMTP_PASS)' \
+          '    res = server.sendmail(ENVELOPE_FROM, recipients, msg.as_string())' \
+          '    print("sendmail result:", res)' \
+          '    server.quit()' \
+          '    if res:' \
+          '        print("WARNING: Some recipients were refused:", res)' \
+          '    else:' \
+          '        print("Email sent OK to", recipients)' \
+          'except smtplib.SMTPAuthenticationError as e:' \
+          '    print("SMTP AUTH ERROR:", e)' \
+          '    sys.exit(1)' \
+          'except smtplib.SMTPException as e:' \
+          '    print("SMTP ERROR:", e)' \
+          '    sys.exit(1)' \
+          'except Exception as e:' \
+          '    print("ERROR:", e)' \
+          '    sys.exit(1)' \
           > email_report.py
-        env:
+          env:
           RECIPIENT_EMAIL: ${{ secrets.RECIPIENTS }}
           SENDER_EMAIL: ${{ secrets.SMTP_FROM }}
           SMTP_HOST: ${{ secrets.SMTP_HOST }}
