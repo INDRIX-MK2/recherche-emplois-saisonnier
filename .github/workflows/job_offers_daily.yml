@@ -10,7 +10,6 @@ on:
         default: "serveur logé, aide barman logé, runner logé, vendanges logé, ouvrier cave logé, aide caviste logé, employé polyvalent logé, cueilleur logé"
 
   schedule:
-    # 09:00 Europe/Paris = 07:00 UTC (été) et 08:00 UTC (hiver)
     - cron: "0 7 * * *"
     - cron: "0 8 * * *"
 
@@ -48,7 +47,6 @@ jobs:
             exit 0
           fi
 
-      # ---- Config ----
       - name: Write sites.json
         run: |
           printf '%s\n' \
@@ -76,7 +74,6 @@ jobs:
           '}' > filters.json
           cat filters.json
 
-      # ---- Étape 1: Collecte brute des liens de recherche ----
       - name: Write fetch_sites.py
         run: |
           printf '%s\n' \
@@ -105,7 +102,6 @@ jobs:
           > fetch_sites.py
           python fetch_sites.py
 
-      # ---- Étape 2: GPT-5-mini enrichissement complet ----
       - name: Write filter_with_gpt.py
         run: |
           printf '%s\n' \
@@ -118,7 +114,11 @@ jobs:
           'TEMP = float(os.getenv("OPENAI_TEMPERATURE","1"))' \
           'CHUNK_SIZE = int(os.getenv("OPENAI_CHUNK_SIZE","25"))' \
           '' \
-          'client = OpenAI(timeout=120.0, max_retries=2)' \
+          '# Passe explicitement la clé (et garde la compatibilite OPENAI_API_KEY)' \
+          'API_KEY = os.getenv("OPENAI_API_KEY")' \
+          'if not API_KEY:' \
+          '    raise RuntimeError("OPENAI_API_KEY is not set")' \
+          'client = OpenAI(api_key=API_KEY, timeout=120.0, max_retries=2)' \
           '' \
           'offers = json.load(open("offers_raw.json","r",encoding="utf-8"))' \
           'filters = json.load(open("filters.json","r",encoding="utf-8"))' \
@@ -168,12 +168,12 @@ jobs:
           'json.dump(out, open("offers_filtered.json","w",encoding="utf-8"), ensure_ascii=False, indent=2)' \
           'print("Done. Total items:", len(aggregated))' \
           > filter_with_gpt.py
+
+      - name: Run filtering (GPT-5 mini)
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-      - name: Run filtering (GPT-5 mini)
         run: python filter_with_gpt.py
 
-      # ---- Étape 3: Email rapport enrichi ----
       - name: Write email_report.py
         run: |
           printf '%s\n' \
@@ -277,7 +277,6 @@ jobs:
           SMTP_PASS: ${{ secrets.SMTP_PASS }}
         run: python email_report.py
 
-      # ---- Étape 4: Artifacts pour debug ----
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
