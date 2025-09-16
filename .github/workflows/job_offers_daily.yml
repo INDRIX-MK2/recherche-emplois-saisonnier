@@ -164,8 +164,7 @@ jobs:
       - name: Write email_report.py
         run: |
           printf '%s\n' \
-          'import os, smtplib, json, sys, re' \
-          'from urllib.parse import urlparse, parse_qs' \
+          'import os, smtplib, json, re' \
           'from email.mime.multipart import MIMEMultipart' \
           'from email.mime.text import MIMEText' \
           '' \
@@ -176,112 +175,75 @@ jobs:
           'SMTP_USER = os.getenv("SMTP_USER")' \
           'SMTP_PASS = os.getenv("SMTP_PASS")' \
           '' \
-          '# Charge d abord filtered, sinon raw' \
-          'data = {}' \
-          'for path in ("offers_filtered.json","offers_raw.json"):' \
-          '    try:' \
-          '        data = json.load(open(path,"r",encoding="utf-8"))' \
-          '        break' \
-          '    except Exception:' \
-          '        continue' \
-          'items = data.get("offers", []) if isinstance(data, dict) else data' \
+          '# Normalisation du nom des sources' \
+          'def pretty_source(raw):' \
+          '    s = (raw or "").strip().lower()' \
+          '    mapping = {' \
+          '        "francetravail": "France Travail",' \
+          '        "hellowork": "HelloWork",' \
+          '        "indeed": "Indeed",' \
+          '        "meteojob": "MeteoJob",' \
+          '        "adzuna": "Adzuna",' \
+          '        "alljobs": "AllJobs",' \
+          '        "linkedin": "LinkedIn",' \
+          '        "google_jobs": "Google Jobs",' \
+          '        "lesjeudis": "Les Jeudis",' \
+          '        "leboncoin": "Le Bon Coin",' \
+          '        "manpower": "Manpower"' \
+          '    }' \
+          '    return mapping.get(s, raw or "?")' \
           '' \
-          'SRC_MAP = {' \
-          '  "francetravail":"France Travail",' \
-          '  "hellowork":"HelloWork",' \
-          '  "indeed":"Indeed",' \
-          '  "meteojob":"Meteojob",' \
-          '  "adzuna":"Adzuna",' \
-          '  "alljobs":"AllJobs",' \
-          '  "linkedin":"LinkedIn",' \
-          '  "google_jobs":"Google for Jobs",' \
-          '  "lesjeudis":"Les Jeudis",' \
-          '  "leboncoin":"Le Bon Coin",' \
-          '  "manpower":"Manpower"' \
-          '}' \
-          '' \
-          'def pretty_source(s):' \
-          '    if not s: return "?"' \
-          '    return SRC_MAP.get(s.strip().lower(), s.strip().title())' \
-          '' \
-          'def strip_source_prefix(title, source):' \
-          '    if not title or not source: return title' \
-          '    pat = r"^\\s*" + re.escape(source) + r"\\s*[:\\-–—|]\\s*"' \
-          '    t2 = re.sub(pat, "", title.strip(), flags=re.IGNORECASE)' \
-          '    return t2 if t2 else title' \
-          '' \
-          'def get_company(it):' \
-          '    for k in ("company","employer","employer_name","entreprise","recruteur","societe","organisation"):' \
-          '        v = it.get(k) if isinstance(it, dict) else None' \
-          '        if isinstance(v, str) and v.strip(): return v.strip()' \
-          '    return "—"' \
-          '' \
-          'def is_search_or_list(url):' \
-          '    try:' \
-          '        u = urlparse(url)' \
-          '        host = (u.netloc or "").lower()' \
-          '        path = (u.path or "").lower()' \
-          '        if not host: return True' \
-          '        if "google." in host: return True' \
-          '        if "recherche" in path and "detail" not in path: return True' \
-          '        if any(seg in path for seg in ["/jobs","/emploi/recherche","/search","/recherche","/offres"]): return True' \
-          '        return False' \
-          '    except Exception:' \
-          '        return True' \
-          '' \
+          '# Fonction pour déterminer le lien final à utiliser' \
           'def build_offer_link(it):' \
+          '    # 1) Priorité à offer_url, sinon url, sinon page_url' \
+          '    for k in ("offer_url", "url", "page_url"):' \
+          '        v = (it.get(k) or "").strip()' \
+          '        if v:' \
+          '            return v' \
+          '    # 2) Reconstruction France Travail si on a un ID' \
           '    src_raw = (it.get("source") or "").strip().lower()' \
-          '    offer_url = (it.get("offer_url") or "").strip()' \
-          '    url = (it.get("url") or "").strip()' \
-          '    page_url = (it.get("page_url") or "").strip()' \
           '    oid = (it.get("offer_id") or "").strip()' \
-          '    if offer_url and not is_search_or_list(offer_url):' \
-          '        return offer_url' \
-          '    if url and not is_search_or_list(url):' \
-          '        return url' \
           '    if src_raw == "francetravail" and oid:' \
           '        return "https://candidat.francetravail.fr/offres/recherche/detail/{0}".format(oid)' \
-          '    if page_url:' \
-          '        try:' \
-          '            u = urlparse(page_url)' \
-          '            if "indeed." in (u.netloc or "").lower():' \
-          '                jk = (parse_qs(u.query).get("jk") or [""])[0]' \
-          '                if jk:' \
-          '                    return "https://{0}/viewjob?jk={1}".format(u.netloc, jk)' \
-          '        except Exception:' \
-          '            pass' \
           '    return ""' \
           '' \
-          'html = ["<h2>Offres saisonnières</h2>", "<ol>"]' \
+          'data = json.load(open("offers_filtered.json","r",encoding="utf-8"))' \
+          '' \
+          'html = ["<h2>Offres saisonnières - Rapport</h2>", "<ol>"]' \
+          'items = data.get("offers", [])' \
+          '' \
           'for it in items[:200]:' \
-          '    if not isinstance(it, dict):' \
-          '        continue' \
           '    src = pretty_source(it.get("source","?"))' \
-          '    title_raw = (it.get("title") or "Offre").strip()' \
-          '    title = strip_source_prefix(title_raw, src)' \
-          '    comp = get_company(it)' \
-          '    score = it.get("score","?")' \
-          '    mail = (it.get("employer_email") or "").strip() or "—"' \
+          '    title = (it.get("title") or "Offre").strip()' \
+          '' \
+          '    # Supprimer le doublon du site dans le titre' \
+          '    pattern = r"^\\s*" + re.escape(src) + r"\\s*[:\\-–—|]\\s*"' \
+          '    title = re.sub(pattern, "", title, flags=re.IGNORECASE) or title' \
+          '' \
+          '    score = str(it.get("score","?"))' \
+          '    company = (it.get("company") or "—").strip()' \
+          '    mail = (it.get("employer_email") or "—").strip()' \
           '    link = build_offer_link(it)' \
           '' \
-          '    # Affiche juste le mot URL cliquable' \
-          '    url_field = "<a href=\"{0}\">URL</a>".format(link) if link else "URL indisponible"' \
+          '    url_field = "<a href=\\"{0}\\">URL</a>".format(link) if link else "URL indisponible"' \
           '' \
-          '    line = "{0}: {1} - {2} - Score: {3} - {4} - {5}"' \
-          '    html.append("<li>" + line.format(src, title, comp, score, url_field, mail) + "</li>")' \
+          '    html.append(f"<li>{src}: {title} - {company} - Score: {score} - {url_field} - {mail}</li>")' \
+          '' \
           'html.append("</ol>")' \
           '' \
           'msg = MIMEMultipart("alternative")' \
-          'msg["Subject"] = "Veille offres saisonnières"' \
+          'msg["Subject"] = "Veille offres saisonnières (agrégées + annotées)"' \
           'msg["From"] = SENDER' \
           'msg["To"] = RECIPIENT' \
           'msg.attach(MIMEText("\\n".join(html), "html", "utf-8"))' \
           '' \
           'with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as s:' \
-          '  s.starttls(); s.login(SMTP_USER, SMTP_PASS)' \
-          '  s.sendmail(SMTP_USER, [x.strip() for x in RECIPIENT.split(",") if x.strip()], msg.as_string())' \
+          '    s.starttls()' \
+          '    s.login(SMTP_USER, SMTP_PASS)' \
+          '    s.sendmail(SENDER, [x.strip() for x in RECIPIENT.split(",") if x.strip()], msg.as_string())' \
           'print("Email sent to", RECIPIENT)' \
           > email_report.py
+
 
 
 
