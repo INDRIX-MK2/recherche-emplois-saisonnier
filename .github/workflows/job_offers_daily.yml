@@ -263,7 +263,7 @@ jobs:
           '    score = it.get("score","?")' \
           '    mail = (it.get("employer_email") or "").strip() or "—"' \
           '    link = build_offer_link(it)' \
-          '    url_field = "<a href=\\"{0}\\">URL</a>".format(link) if link else "URL indisponible"' \
+          '    url_field = "<a href=\\"{0}\">URL</a>".format(link) if link else "URL indisponible"' \
           '    line = "{0}: {1} - {2} - Score: {3} - {4} - {5}"' \
           '    html.append("<li>" + line.format(src, title, comp, score, url_field, mail) + "</li>")' \
           'html.append("</ol>")' \
