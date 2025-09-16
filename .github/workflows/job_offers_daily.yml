@@ -4,10 +4,11 @@ on:
   workflow_dispatch:
     inputs:
       search_terms:
-        description: "Mots-clés (ex: serveur logé, aide barman logé, runner logé, vendanges logé)"
+        description: "Mots-clés pour la recherche (ex: serveur logé, aide barman logé, vendanges logé)"
         type: string
         required: true
         default: "serveur logé, aide barman logé, runner logé, vendanges logé, ouvrier cave logé, aide caviste logé, employé polyvalent logé, cueilleur logé"
+
   schedule:
     # 09:00 Europe/Paris = 07:00 UTC (été) et 08:00 UTC (hiver)
     - cron: "0 7 * * *"
@@ -22,20 +23,24 @@ jobs:
       OPENAI_TEMPERATURE: "1"
 
     steps:
+      # 1. Récupération du repo
       - name: Checkout
         uses: actions/checkout@v4
 
+      # 2. Setup Python
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
+      # 3. Installer dépendances
       - name: Install deps
         run: |
           python -m pip install --upgrade pip
           pip install "httpx<0.28"
-          pip install requests beautifulsoup4 lxml html5lib "openai==1.51.0"
+          pip install requests beautifulsoup4 lxml html5lib backoff "openai==1.51.0"
 
+      # 4. Vérifier l'heure locale pour éviter les doublons
       - name: Guard 09:00 Europe/Paris (éviter les doublons)
         env:
           GITHUB_EVENT_NAME: ${{ github.event_name }}
@@ -46,6 +51,7 @@ jobs:
             exit 0
           fi
 
+      # 5. Liste des sites à scanner
       - name: Write sites.json
         run: |
           printf '%s\n' \
@@ -54,6 +60,7 @@ jobs:
           ']' > sites.json
           cat sites.json
 
+      # 6. Filtres pour GPT
       - name: Write filters.json
         run: |
           printf '%s\n' \
@@ -73,6 +80,7 @@ jobs:
           '}' > filters.json
           cat filters.json
 
+      # 7. Script collecte brute
       - name: Write fetch_sites.py
         run: |
           printf '%s\n' \
@@ -97,22 +105,48 @@ jobs:
           > fetch_sites.py
           python fetch_sites.py
 
+      # 8. GPT-5-mini avec retry et backoff
       - name: Write filter_with_gpt.py
         run: |
           printf '%s\n' \
-          'import json, os' \
+          'import json, os, time' \
+          'import backoff' \
+          'import httpx' \
           'from openai import OpenAI' \
-          'client = OpenAI()' \
-          'model = os.getenv("OPENAI_MODEL","gpt-4o-mini")' \
+          'from openai import APIConnectionError, RateLimitError, APIStatusError' \
+          '' \
+          '# Configuration OpenAI - modèle forcé GPT-5-mini' \
+          'client = OpenAI(timeout=60.0, max_retries=2)' \
+          'model = os.getenv("OPENAI_MODEL","gpt-5-mini")' \
           'temperature = float(os.getenv("OPENAI_TEMPERATURE","1"))' \
+          '' \
           'offers = json.load(open("offers_raw.json","r",encoding="utf-8"))' \
           'filters = json.load(open("filters.json","r",encoding="utf-8"))' \
+          '' \
           'sys_prompt = {"role":"system","content":"Tu filtres des offres. Ne supprime rien. Classe et annote avec un score basé sur logement>lieu (métropole sans Corse/DOM-COM)>durée (7-92j)>métier. Réponds JSON {offers:[...] }."}' \
           'user_payload = {"filters":filters,"offers":offers}' \
-          'resp = client.chat.completions.create(model=model,temperature=temperature,messages=[sys_prompt,{"role":"user","content":json.dumps(user_payload,ensure_ascii=False)}])' \
+          '' \
+          '# Backoff exponentiel jusqu à 6 tentatives' \
+          '@backoff.on_exception(' \
+          '  backoff.expo,' \
+          '  (APIConnectionError, httpx.RemoteProtocolError, httpx.ConnectError, httpx.ReadTimeout, RateLimitError, APIStatusError),' \
+          '  max_tries=6,' \
+          '  jitter=backoff.full_jitter' \
+          ')' \
+          'def call_openai():' \
+          '  return client.chat.completions.create(' \
+          '    model=model,' \
+          '    temperature=temperature,' \
+          '    messages=[sys_prompt, {"role":"user","content":json.dumps(user_payload, ensure_ascii=False)}]' \
+          '  )' \
+          '' \
+          'resp = call_openai()' \
           'content = resp.choices[0].message.content' \
-          'try: data = json.loads(content)' \
-          'except Exception: data = {"offers": offers, "raw_response": content}' \
+          'try:' \
+          '  data = json.loads(content)' \
+          'except Exception:' \
+          '  data = {"offers": offers, "raw_response": content}' \
+          '' \
           'json.dump(data, open("offers_filtered.json","w",encoding="utf-8"), ensure_ascii=False, indent=2)' \
           'print("Filtered summary written.")' \
           > filter_with_gpt.py
@@ -122,19 +156,23 @@ jobs:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: python filter_with_gpt.py
 
+      # 9. Génération email
       - name: Write email_report.py
         run: |
           printf '%s\n' \
           'import os, smtplib, json' \
           'from email.mime.multipart import MIMEMultipart' \
           'from email.mime.text import MIMEText' \
+          '' \
           'RECIPIENT = os.getenv("RECIPIENT_EMAIL")' \
           'SENDER = os.getenv("SENDER_EMAIL")' \
           'SMTP_HOST = os.getenv("SMTP_HOST")' \
           'SMTP_PORT = int(os.getenv("SMTP_PORT"))' \
           'SMTP_USER = os.getenv("SMTP_USER")' \
           'SMTP_PASS = os.getenv("SMTP_PASS")' \
+          '' \
           'data = json.load(open("offers_filtered.json","r",encoding="utf-8"))' \
+          '' \
           'html = ["<h2>Offres saisonnières - Rapport</h2>","<ol>"]' \
           'items = data.get("offers", [])' \
           'for item in items[:200]:' \
@@ -145,11 +183,13 @@ jobs:
           '  note = item.get("note","")' \
           '  html.append(f"<li><b>{title}</b> - {source} - Score: {score} - <a href=\\"{url}\\">Lien</a> - {note}</li>")' \
           'html.append("</ol>")' \
+          '' \
           'msg = MIMEMultipart("alternative")' \
           'msg["Subject"] = "Veille offres saisonnières (agrégées + annotées)"' \
           'msg["From"] = SENDER' \
           'msg["To"] = RECIPIENT' \
           'msg.attach(MIMEText("\\n".join(html), "html", "utf-8"))' \
+          '' \
           'with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as s:' \
           '  s.starttls()' \
           '  s.login(SMTP_USER, SMTP_PASS)' \
@@ -167,6 +207,7 @@ jobs:
           SMTP_PASS: ${{ secrets.SMTP_PASS }}
         run: python email_report.py
 
+      # 10. Sauvegarde des fichiers
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
