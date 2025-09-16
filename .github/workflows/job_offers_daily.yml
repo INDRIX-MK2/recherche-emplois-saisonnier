@@ -4,13 +4,13 @@ on:
   workflow_dispatch:
     inputs:
       search_terms:
-        description: "Mots-cles pour la recherche (ex: serveur loge, aide barman loge, vendanges loge)"
+        description: "Mots-clés pour la recherche (ex: serveur logé, aide barman logé, vendanges logé)"
         type: string
         required: true
-        default: "serveur loge, aide barman loge, runner loge, vendanges loge, ouvrier cave loge, aide caviste loge, employe polyvalent loge, cueilleur loge"
+        default: "serveur logé, aide barman logé, runner logé, vendanges logé, ouvrier cave logé, aide caviste logé, employé polyvalent logé, cueilleur logé"
 
-  # 09:00 Europe/Paris = 07:00 UTC (ete) et 08:00 UTC (hiver)
   schedule:
+    # 09:00 Europe/Paris = 07:00 UTC (été) et 08:00 UTC (hiver)
     - cron: "0 7 * * *"
     - cron: "0 8 * * *"
 
@@ -32,13 +32,13 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install dependencies
+      - name: Install deps
         run: |
           python -m pip install --upgrade pip
           pip install "httpx<0.28"
           pip install requests beautifulsoup4 lxml html5lib backoff "openai==1.51.0"
 
-      - name: Guard 09:00 Europe/Paris (eviter les doublons)
+      - name: Guard 09:00 Europe/Paris (éviter les doublons)
         env:
           GITHUB_EVENT_NAME: ${{ github.event_name }}
         run: |
@@ -48,7 +48,6 @@ jobs:
             exit 0
           fi
 
-      # ---------------- CONFIG ----------------
       - name: Write sites.json
         run: |
           printf '%s\n' \
@@ -70,162 +69,54 @@ jobs:
           '  "allowed_jobs": [' \
           '    "serveur","serveuse","runner","aide de salle","aide barman","commis de bar",' \
           '    "vendangeur","porteuse","porteur","trieur","ouvrier agricole polyvalent",' \
-          '    "ouvrier de cave","aide caviste","employe polyvalent","employe polyvalent",' \
+          '    "ouvrier de cave","aide caviste","employe polyvalent","employé polyvalent",' \
           '    "cueilleur","cueilleuse"' \
           '  ]' \
           '}' > filters.json
           cat filters.json
 
-      # -------------- ETAPE 1: URLs de recherche (seed) --------------
       - name: Write fetch_sites.py
-        env:
-          SEARCH_TERMS: ${{ github.event.inputs.search_terms }}
         run: |
           printf '%s\n' \
           'import json, os, requests' \
           'SITES = json.load(open("sites.json","r",encoding="utf-8"))' \
-          'TERMS = os.getenv("SEARCH_TERMS","").strip()' \
-          'if not TERMS:' \
-          '    TERMS = "serveur loge, aide barman loge, runner loge, vendanges loge, ouvrier cave loge, aide caviste loge, employe polyvalent loge, cueilleur loge"' \
+          'TERMS = os.getenv("SEARCH_TERMS","").strip() or "${{ github.event.inputs.search_terms }}"' \
           'def q(s): return requests.utils.quote(s)' \
-          '' \
-          'def results_indeed(t): return [{"source":"indeed","url":f"https://fr.indeed.com/jobs?q={q(t)}&l=France","title":"Indeed search: "+t}]' \
-          'def results_hellowork(t): return [{"source":"hellowork","url":f"https://www.hellowork.com/fr-fr/emploi/recherche.html?k={q(t)}&l=France","title":"HelloWork search: "+t}]' \
+          'def results_indeed(t): return [{"source":"indeed","url":f"https://fr.indeed.com/jobs?q={q(t)}+log%C3%A9&l=France","title":"Indeed search: "+t}]' \
+          'def results_hellowork(t): return [{"source":"hellowork","url":f"https://www.hellowork.com/fr-fr/emploi/recherche.html?k={q(t)}+logement","title":"HelloWork search: "+t}]' \
           'def results_monster(t): return [{"source":"monster","url":f"https://www.monster.fr/emploi/recherche/?q={q(t)}&where=France","title":"Monster search: "+t}]' \
           'def results_francetravail(t): return [{"source":"francetravail","url":f"https://candidat.francetravail.fr/offres/recherche?k={q(t)}&l=France","title":"France Travail search: "+t}]' \
-          'def results_simple(engine, t): return [{"source":engine,"url":f"https://www.google.com/search?q=site%3A{engine}.com+{q(t)}+France","title":engine+" via Google"}]' \
-          '' \
+          'def results_simple(engine, t): return [{"source":engine,"url":f"https://www.google.com/search?q=site%3A{engine}.com+{q(t)}+log%C3%A9+France","title":engine+" via Google"}]' \
           'DISPATCH = {"indeed":results_indeed,"hellowork":results_hellowork,"monster":results_monster,"francetravail":results_francetravail}' \
-          '' \
           'raw=[]' \
-          'terms=[x.strip() for x in TERMS.split(",") if x.strip()] or ["serveur","aide barman","runner","vendanges","ouvrier cave","aide caviste","employe polyvalent","cueilleur"]' \
+          'terms=[x.strip() for x in TERMS.split(",") if x.strip()] or ["serveur logé","aide barman logé","runner logé","vendanges logé","ouvrier cave logé","aide caviste logé","employé polyvalent logé","cueilleur logé"]' \
           'for site in SITES:' \
           '  for t in terms:' \
-          '    fn = DISPATCH.get(site)' \
-          '    raw.extend(fn(t) if fn else results_simple(site, t))' \
-          '' \
+          '    fn=DISPATCH.get(site)' \
+          '    raw.extend(fn(t) if fn else results_simple(site,t))' \
           'json.dump(raw, open("offers_raw.json","w",encoding="utf-8"), ensure_ascii=False, indent=2)' \
           'print("Collected seeds:", len(raw))' \
           > fetch_sites.py
           python fetch_sites.py
 
-      # -------------- ETAPE 1bis: Telechargement HTML (brut) --------------
-      - name: Write fetch_html.py
-        env:
-          MAX_PAGES: "120"
-        run: |
-          printf '%s\n' \
-          'import json, re, requests, time, os' \
-          '' \
-          'HEADERS = {' \
-          '  "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",' \
-          '  "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",' \
-          '  "Accept-Language": "fr-FR,fr;q=0.9,en;q=0.8",' \
-          '  "Connection": "close"' \
-          '}' \
-          '' \
-          'def strip_js_css(html):' \
-          '    try:' \
-          '        html = re.sub("<script[\\s\\S]*?</script>", "", html, flags=re.IGNORECASE)' \
-          '        html = re.sub("<style[\\s\\S]*?</style>", "", html, flags=re.IGNORECASE)' \
-          '    except Exception:' \
-          '        pass' \
-          '    return html' \
-          '' \
-          'def fetch(url, session, timeout=25):' \
-          '    try:' \
-          '        r = session.get(url, headers=HEADERS, timeout=timeout, allow_redirects=True)' \
-          '        return r.status_code, (r.text or "")' \
-          '    except Exception as e:' \
-          '        return 0, str(e)' \
-          '' \
-          'offers = json.load(open("offers_raw.json","r",encoding="utf-8"))' \
-          'session = requests.Session()' \
-          'out = []' \
-          'MAX_HTML = 120000' \
-          'try:' \
-          '    MAX_PAGES = int(os.getenv("MAX_PAGES","0"))' \
-          'except Exception:' \
-          '    MAX_PAGES = 0' \
-          '' \
-          'http_stats = {}' \
-          'count = 0' \
-          'for it in offers:' \
-          '    count += 1' \
-          '    if MAX_PAGES and count > MAX_PAGES:' \
-          '        break' \
-          '    url = it.get("url","")' \
-          '    source = it.get("source","")' \
-          '    title = it.get("title","")' \
-          '    status, html = fetch(url, session)' \
-          '    http_stats[status] = http_stats.get(status,0) + 1' \
-          '    cleaned = strip_js_css(html)[:MAX_HTML]' \
-          '    out.append({"source":source,"title":title,"url":url,"status":status,"html":cleaned})' \
-          '    if count % 10 == 0:' \
-          '        time.sleep(1)' \
-          '' \
-          'json.dump(out, open("offers_pages.json","w",encoding="utf-8"), ensure_ascii=False, indent=2)' \
-          'print("Fetched pages:", len(out))' \
-          'print("HTTP status stats:", http_stats)' \
-          > fetch_html.py
-          python fetch_html.py
-
-      # -------------- ETAPE 2: Extraction/Scoring GPT-5-mini (HTML segmente) --------------
       - name: Write filter_with_gpt.py
-        env:
-          SEG_CHARS: "12000"
-          SLEEP_BETWEEN_CALLS: "0.6"
-          MAX_COMPLETION_TOKENS: "2500"
         run: |
           printf '%s\n' \
-          'import json, os, time, re' \
+          'import json, os' \
           'import backoff, httpx' \
           'from openai import OpenAI' \
           'from openai import APIConnectionError, RateLimitError, APIStatusError, APITimeoutError' \
           '' \
           'MODEL = os.getenv("OPENAI_MODEL","gpt-5-mini")' \
           'TEMP = float(os.getenv("OPENAI_TEMPERATURE","1"))' \
-          'SEG_CHARS = int(os.getenv("SEG_CHARS","12000"))' \
-          'SLEEP_BETWEEN_CALLS = float(os.getenv("SLEEP_BETWEEN_CALLS","0.6"))' \
-          'MAX_COMPLETION_TOKENS = int(os.getenv("MAX_COMPLETION_TOKENS","2500"))' \
+          'CHUNK_SIZE = int(os.getenv("OPENAI_CHUNK_SIZE","25"))' \
           '' \
-          'API_KEY = os.getenv("OPENAI_API_KEY")' \
-          'if not API_KEY:' \
-          '    raise RuntimeError("OPENAI_API_KEY is not set")' \
-          'client = OpenAI(api_key=API_KEY, timeout=120.0, max_retries=2)' \
+          'client = OpenAI(timeout=120.0, max_retries=2)' \
           '' \
-          'pages = json.load(open("offers_pages.json","r",encoding="utf-8"))' \
+          'offers = json.load(open("offers_raw.json","r",encoding="utf-8"))' \
           'filters = json.load(open("filters.json","r",encoding="utf-8"))' \
           '' \
-          'def squeeze_ws(s):' \
-          '    try:' \
-          '        return re.sub("\\s+", " ", s).strip()' \
-          '    except Exception:' \
-          '        return s' \
-          '' \
-          'def split_segments(text, max_chars):' \
-          '    text = squeeze_ws(text or "")' \
-          '    if len(text) <= max_chars:' \
-          '        return [text]' \
-          '    segs = []' \
-          '    i = 0' \
-          '    while i < len(text):' \
-          '        segs.append(text[i:i+max_chars])' \
-          '        i += max_chars' \
-          '    return segs' \
-          '' \
-          'sys_prompt = {"role":"system","content": """Tu recois un segment de HTML provenant d une page de resultats ou de liste d offres.' \
-          'Extraire autant d offres pertinentes que possible depuis ce segment uniquement sans inventer.' \
-          'Pour chaque offre:' \
-          '- title: titre de l offre' \
-          '- source: nom du site d origine' \
-          '- url: lien direct si visible sinon "#"' \
-          '- offer_id: identifiant si visible sinon vide' \
-          '- employer_email: email si visible sinon vide' \
-          '- score: 0-100 selon logement disponible priorite, localisation France metropolitaine hors Corse et DOM COM, duree 7-92 jours, metier autorise' \
-          '- note: justification courte' \
-          'Sortie JSON strict {"offers":[{...}]}.' \
-          'Ne retourner au maximum que 40 items par segment."""}' \
+          'sys_prompt = {"role":"system","content":"Tu filtres des offres. NE SUPPRIME RIEN. Pour chaque offre, ajoute un score (0-100) basé sur: 1) logement (priorité max), 2) lieu (France métropolitaine, sans Corse/DOM-COM), 3) durée (7-92 jours), 4) métier (dans la liste). Réponds en JSON strict {offers:[{...}]}. Court et structuré."}' \
           '' \
           '@backoff.on_exception(' \
           '  backoff.expo,' \
@@ -238,57 +129,32 @@ jobs:
           '    model=MODEL,' \
           '    temperature=TEMP,' \
           '    response_format={"type":"json_object"},' \
-          '    max_completion_tokens=MAX_COMPLETION_TOKENS,' \
           '    messages=[' \
           '      sys_prompt,' \
           '      {"role":"user","content": json.dumps(payload, ensure_ascii=False)}' \
           '    ]' \
           '  )' \
           '' \
-          'def dedup(offers):' \
-          '  out, seen = [], set()' \
-          '  for it in offers:' \
-          '    title = (it.get("title","") or "").strip().lower()' \
-          '    source = (it.get("source","") or "").strip().lower()' \
-          '    oid = (it.get("offer_id","") or "").strip().lower()' \
-          '    url = (it.get("url","") or "").split("?")[0].strip().lower()' \
-          '    key = oid or url or (title + "|" + source)' \
-          '    if key and key not in seen:' \
-          '      seen.add(key)' \
-          '      out.append(it)' \
-          '  return out' \
+          'def chunks(lst, n):' \
+          '  for i in range(0, len(lst), n):' \
+          '    yield lst[i:i+n]' \
           '' \
           'aggregated = []' \
-          'total_calls = 0' \
+          'for idx, part in enumerate(chunks(offers, CHUNK_SIZE), start=1):' \
+          '  payload = {"filters": filters, "offers": part}' \
+          '  resp = call_openai(payload)' \
+          '  content = resp.choices[0].message.content' \
+          '  try:' \
+          '    data = json.loads(content)' \
+          '    part_offers = data.get("offers", [])' \
+          '  except Exception:' \
+          '    part_offers = [{"title":"(parse error)","source":"gpt","url":"#","note":"Réponse non JSON","score":0}]' \
+          '  aggregated.extend(part_offers)' \
+          '  print(f"Chunk {idx}: +{len(part_offers)} items")' \
           '' \
-          'for p_idx, page in enumerate(pages, start=1):' \
-          '  src = page.get("source","")' \
-          '  url = page.get("url","")' \
-          '  title = page.get("title","")' \
-          '  html = page.get("html","")' \
-          '  segments = split_segments(html, SEG_CHARS)' \
-          '  for s_idx, seg in enumerate(segments, start=1):' \
-          '    payload = {"filters": filters, "page_meta": {"source": src, "url": url, "title": title, "segment_index": s_idx, "total_segments": len(segments)}, "html_segment": seg}' \
-          '    try:' \
-          '      resp = call_openai(payload)' \
-          '    except RateLimitError:' \
-          '      time.sleep(max(SLEEP_BETWEEN_CALLS*3, 2.0))' \
-          '      resp = call_openai(payload)' \
-          '    total_calls += 1' \
-          '    content = resp.choices[0].message.content' \
-          '    try:' \
-          '      data = json.loads(content)' \
-          '      part = data.get("offers", [])' \
-          '    except Exception:' \
-          '      part = [{"title":"(parse error)", "source":"gpt", "url":"#", "note":"Reponse non JSON", "score":0}]' \
-          '    aggregated.extend(part)' \
-          '    print(f"Page {p_idx}/{len(pages)} seg {s_idx}/{len(segments)}: +{len(part)} items")' \
-          '    time.sleep(SLEEP_BETWEEN_CALLS)' \
-          '' \
-          'aggregated = dedup(aggregated)' \
           'out = {"offers": aggregated}' \
           'json.dump(out, open("offers_filtered.json","w",encoding="utf-8"), ensure_ascii=False, indent=2)' \
-          'print("Done. Total items:", len(aggregated), " API calls:", total_calls)' \
+          'print("Done. Total items:", len(aggregated))' \
           > filter_with_gpt.py
 
       - name: Run filtering (GPT-5 mini)
@@ -296,103 +162,50 @@ jobs:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: python filter_with_gpt.py
 
-      # -------------- ETAPE 3: Email HTML (destinataires en dur) --------------
       - name: Write email_report.py
         run: |
           printf '%s\n' \
-          'import os, smtplib, json, sys' \
+          'import os, smtplib, json' \
           'from email.mime.multipart import MIMEMultipart' \
           'from email.mime.text import MIMEText' \
           '' \
-          'RECIPIENTS = ["indrix.mk@gmail.com","stellameftah@gmail.com"]' \
-          'SENDER = os.getenv("SENDER_EMAIL") or ""' \
-          'SMTP_HOST = os.getenv("SMTP_HOST") or ""' \
-          'SMTP_PORT_RAW = os.getenv("SMTP_PORT") or ""' \
-          'SMTP_USER = os.getenv("SMTP_USER") or ""' \
-          'SMTP_PASS = os.getenv("SMTP_PASS") or ""' \
-          '' \
-          'try:' \
-          '    SMTP_PORT = int(SMTP_PORT_RAW)' \
-          'except Exception:' \
-          '    print("ERROR: SMTP_PORT invalid or missing:", repr(SMTP_PORT_RAW))' \
-          '    sys.exit(1)' \
-          '' \
-          'missing = [k for k,v in {"SMTP_HOST":SMTP_HOST,"SMTP_PORT":SMTP_PORT_RAW,"SMTP_USER":SMTP_USER,"SMTP_PASS":"***"}.items() if not v]' \
-          'if missing:' \
-          '    print("ERROR: Missing required envs:", missing)' \
-          '    sys.exit(1)' \
-          '' \
-          'ENVELOPE_FROM = SMTP_USER' \
-          'if not SENDER:' \
-          '    SENDER = SMTP_USER' \
+          'RECIPIENT = os.getenv("RECIPIENT_EMAIL")' \
+          'SENDER = os.getenv("SENDER_EMAIL")' \
+          'SMTP_HOST = os.getenv("SMTP_HOST")' \
+          'SMTP_PORT = int(os.getenv("SMTP_PORT"))' \
+          'SMTP_USER = os.getenv("SMTP_USER")' \
+          'SMTP_PASS = os.getenv("SMTP_PASS")' \
           '' \
           'data = json.load(open("offers_filtered.json","r",encoding="utf-8"))' \
           '' \
-          'html = ["<h2>Offres saisonnieres - Rapport</h2>", "<ol>"]' \
-          'for item in data.get("offers", [])[:200]:' \
-          '    title = item.get("title", "Offre")' \
-          '    url = item.get("url", "#")' \
-          '    score = item.get("score", "?")' \
-          '    source = item.get("source", "?")' \
-          '    note = item.get("note", "")' \
-          '    oid = item.get("offer_id", "")' \
-          '    mail = item.get("employer_email", "")' \
-          '' \
-          '    extra = []' \
-          '    if oid:' \
-          '        extra.append("ID: {0}".format(oid))' \
-          '    if mail:' \
-          '        extra.append("Contact: <a href=&quot;mailto:{0}&quot;>{0}</a>".format(mail))' \
-          '' \
-          '    extra_html = " - ".join(extra)' \
-          '    if extra_html:' \
-          '        extra_html = " - " + extra_html' \
-          '' \
-          '    html.append("<li><b>{0}</b> - {1} - Score: {2}{3} - <a href=&quot;{4}&quot;>Lien</a> - {5}</li>".format(title, source, score, extra_html, url, note))' \
-          '' \
+          'html = ["<h2>Offres saisonnières - Rapport</h2>","<ol>"]' \
+          'items = data.get("offers", [])' \
+          'for item in items[:200]:' \
+          '  title = item.get("title","Offre")' \
+          '  url = item.get("url","#")' \
+          '  score = item.get("score","?")' \
+          '  source = item.get("source","?")' \
+          '  note = item.get("note","")' \
+          "  html.append(f\"<li><b>{title}</b> - {source} - Score: {score} - <a href='{url}'>Lien</a> - {note}</li>\")" \
           'html.append("</ol>")' \
           '' \
           'msg = MIMEMultipart("alternative")' \
-          'msg["Subject"] = "Veille offres saisonnieres enrichie (GPT-5-mini)"' \
+          'msg["Subject"] = "Veille offres saisonnières (agrégées + annotées)"' \
           'msg["From"] = SENDER' \
-          'msg["To"] = ", ".join(RECIPIENTS)' \
-          'msg["Reply-To"] = SENDER' \
+          'msg["To"] = RECIPIENT' \
           'msg.attach(MIMEText("\\n".join(html), "html", "utf-8"))' \
           '' \
-          'use_ssl = (SMTP_PORT == 465)' \
-          'print("SMTP debug: host={0} port={1} ssl={2} sender={3} to={4}".format(SMTP_HOST, SMTP_PORT, use_ssl, SENDER, RECIPIENTS))' \
-          '' \
-          'try:' \
-          '    if use_ssl:' \
-          '        server = smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, timeout=60)' \
-          '    else:' \
-          '        server = smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=60)' \
-          '    server.set_debuglevel(1)' \
-          '    if not use_ssl:' \
-          '        server.ehlo()' \
-          '        server.starttls()' \
-          '        server.ehlo()' \
-          '    server.login(SMTP_USER, SMTP_PASS)' \
-          '    res = server.sendmail(ENVELOPE_FROM, RECIPIENTS, msg.as_string())' \
-          '    print("sendmail result:", res)' \
-          '    server.quit()' \
-          '    if res:' \
-          '        print("WARNING: Some recipients were refused:", res)' \
-          '    else:' \
-          '        print("Email sent OK to", RECIPIENTS)' \
-          'except smtplib.SMTPAuthenticationError as e:' \
-          '    print("SMTP AUTH ERROR:", e)' \
-          '    sys.exit(1)' \
-          'except smtplib.SMTPException as e:' \
-          '    print("SMTP ERROR:", e)' \
-          '    sys.exit(1)' \
-          'except Exception as e:' \
-          '    print("ERROR:", e)' \
-          '    sys.exit(1)' \
+          'with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as s:' \
+          '  s.starttls()' \
+          '  s.login(SMTP_USER, SMTP_PASS)' \
+          '  s.sendmail(SENDER, [x.strip() for x in RECIPIENT.split(",") if x.strip()], msg.as_string())' \
+          'print("Email sent to", RECIPIENT)' \
           > email_report.py
+
 
       - name: Send email
         env:
+          RECIPIENT_EMAIL: ${{ secrets.RECIPIENTS }}
           SENDER_EMAIL: ${{ secrets.SMTP_FROM }}
           SMTP_HOST: ${{ secrets.SMTP_HOST }}
           SMTP_PORT: ${{ secrets.SMTP_PORT }}
@@ -400,7 +213,6 @@ jobs:
           SMTP_PASS: ${{ secrets.SMTP_PASS }}
         run: python email_report.py
 
-      # -------------- Artefacts pour debug --------------
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -409,5 +221,4 @@ jobs:
             sites.json
             filters.json
             offers_raw.json
-            offers_pages.json
             offers_filtered.json
