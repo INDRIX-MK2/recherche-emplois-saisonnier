@@ -128,7 +128,7 @@ jobs:
           '1) Extraire toutes les annonces listees.' \
           '2) Pour chaque annonce, recuperer le titre, le lien direct, le numero d offre (id) s il est present, et l email de contact employeur s il existe.' \
           '3) Appliquer un score 0-100 base sur: logement disponible (priorite), localisation France metropolitaine (pas Corse ni DOM-COM), duree entre 7 et 92 jours, metiers autorises.' \
-          'Retourner uniquement du JSON strict au format {offers:[{title,source,url,offer_id,employer_email,score,note}]}."""}' \
+          'Retourner uniquement du JSON strict au format {"offers":[{"title":...,"source":...,"url":...,"offer_id":...,"employer_email":...,"score":...,"note":...}]}."""}' \
           '' \
           '@backoff.on_exception(' \
           '  backoff.expo,' \
@@ -168,9 +168,10 @@ jobs:
           'json.dump(out, open("offers_filtered.json","w",encoding="utf-8"), ensure_ascii=False, indent=2)' \
           'print("Done. Total items:", len(aggregated))' \
           > filter_with_gpt.py
-          python filter_with_gpt.py
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      - name: Run filtering (GPT-5 mini)
+        run: python filter_with_gpt.py
 
       # ---- Étape 3: Email rapport enrichi ----
       - name: Write email_report.py
@@ -180,7 +181,7 @@ jobs:
           'from email.mime.multipart import MIMEMultipart' \
           'from email.mime.text import MIMEText' \
           '' \
-          'RECIPIENT = os.getenv("RECIPIENT_EMAIL") or ""' \
+          'RECIPIENTS = ["indrix.mk@gmail.com","stellameftah@gmail.com"]' \
           'SENDER = os.getenv("SENDER_EMAIL") or ""' \
           'SMTP_HOST = os.getenv("SMTP_HOST") or ""' \
           'SMTP_PORT_RAW = os.getenv("SMTP_PORT") or ""' \
@@ -193,12 +194,11 @@ jobs:
           '    print("ERROR: SMTP_PORT invalid or missing:", repr(SMTP_PORT_RAW))' \
           '    sys.exit(1)' \
           '' \
-          'missing = [k for k,v in {"RECIPIENT_EMAIL":RECIPIENT,"SMTP_HOST":SMTP_HOST,"SMTP_PORT":SMTP_PORT_RAW,"SMTP_USER":SMTP_USER,"SMTP_PASS":"***"}.items() if not v]' \
+          'missing = [k for k,v in {"SMTP_HOST":SMTP_HOST,"SMTP_PORT":SMTP_PORT_RAW,"SMTP_USER":SMTP_USER,"SMTP_PASS":"***"}.items() if not v]' \
           'if missing:' \
           '    print("ERROR: Missing required envs:", missing)' \
           '    sys.exit(1)' \
           '' \
-          '# Envelope sender doit correspondre au compte authentifie' \
           'ENVELOPE_FROM = SMTP_USER' \
           'if not SENDER:' \
           '    SENDER = SMTP_USER' \
@@ -232,17 +232,12 @@ jobs:
           'msg = MIMEMultipart("alternative")' \
           'msg["Subject"] = "Veille offres saisonnieres enrichie (GPT-5-mini)"' \
           'msg["From"] = SENDER' \
-          'msg["To"] = RECIPIENT' \
+          'msg["To"] = ", ".join(RECIPIENTS)' \
           'msg["Reply-To"] = SENDER' \
           'msg.attach(MIMEText("\\n".join(html), "html", "utf-8"))' \
           '' \
-          'recipients = [x.strip() for x in RECIPIENT.split(",") if x.strip()]' \
-          'if not recipients:' \
-          '    print("ERROR: No recipients parsed from RECIPIENT_EMAIL")' \
-          '    sys.exit(1)' \
-          '' \
           'use_ssl = (SMTP_PORT == 465)' \
-          'print("SMTP debug: host={0} port={1} ssl={2} sender={3} to={4}".format(SMTP_HOST, SMTP_PORT, use_ssl, SENDER, recipients))' \
+          'print("SMTP debug: host={0} port={1} ssl={2} sender={3} to={4}".format(SMTP_HOST, SMTP_PORT, use_ssl, SENDER, RECIPIENTS))' \
           '' \
           'try:' \
           '    if use_ssl:' \
@@ -255,13 +250,13 @@ jobs:
           '        server.starttls()' \
           '        server.ehlo()' \
           '    server.login(SMTP_USER, SMTP_PASS)' \
-          '    res = server.sendmail(ENVELOPE_FROM, recipients, msg.as_string())' \
+          '    res = server.sendmail(ENVELOPE_FROM, RECIPIENTS, msg.as_string())' \
           '    print("sendmail result:", res)' \
           '    server.quit()' \
           '    if res:' \
           '        print("WARNING: Some recipients were refused:", res)' \
           '    else:' \
-          '        print("Email sent OK to", recipients)' \
+          '        print("Email sent OK to", RECIPIENTS)' \
           'except smtplib.SMTPAuthenticationError as e:' \
           '    print("SMTP AUTH ERROR:", e)' \
           '    sys.exit(1)' \
@@ -272,13 +267,15 @@ jobs:
           '    print("ERROR:", e)' \
           '    sys.exit(1)' \
           > email_report.py
+
+      - name: Send email
         env:
-          RECIPIENT_EMAIL: ${{ secrets.RECIPIENTS }}
           SENDER_EMAIL: ${{ secrets.SMTP_FROM }}
           SMTP_HOST: ${{ secrets.SMTP_HOST }}
           SMTP_PORT: ${{ secrets.SMTP_PORT }}
           SMTP_USER: ${{ secrets.SMTP_USER }}
           SMTP_PASS: ${{ secrets.SMTP_PASS }}
+        run: python email_report.py
 
       # ---- Étape 4: Artifacts pour debug ----
       - name: Upload artifacts
