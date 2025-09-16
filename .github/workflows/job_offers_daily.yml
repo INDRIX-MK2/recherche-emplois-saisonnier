@@ -164,7 +164,7 @@ jobs:
       - name: Write email_report.py
         run: |
           printf '%s\n' \
-          'import os, smtplib, json' \
+          'import os, smtplib, json, sys' \
           'from email.mime.multipart import MIMEMultipart' \
           'from email.mime.text import MIMEText' \
           '' \
@@ -175,31 +175,64 @@ jobs:
           'SMTP_USER = os.getenv("SMTP_USER")' \
           'SMTP_PASS = os.getenv("SMTP_PASS")' \
           '' \
-          'data = json.load(open("offers_filtered.json","r",encoding="utf-8"))' \
+          'data = {}' \
+          'for path in ("offers_filtered.json","offers_raw.json"):' \
+          '    try:' \
+          '        data = json.load(open(path,"r",encoding="utf-8"))' \
+          '        break' \
+          '    except Exception:' \
+          '        continue' \
+          'items = data.get("offers", []) if isinstance(data, dict) else data' \
           '' \
-          'html = ["<h2>Offres saisonnières - Rapport</h2>","<ol>"]' \
-          'items = data.get("offers", [])' \
-          'for item in items[:200]:' \
-          '  title = item.get("title","Offre")' \
-          '  url = item.get("url","#")' \
-          '  score = item.get("score","?")' \
-          '  source = item.get("source","?")' \
-          '  note = item.get("note","")' \
-          "  html.append(f\"<li><b>{title}</b> - {source} - Score: {score} - <a href='{url}'>Lien</a> - {note}</li>\")" \
+          'SRC_MAP = {' \
+          '  "francetravail":"France Travail",' \
+          '  "hellowork":"HelloWork",' \
+          '  "indeed":"Indeed",' \
+          '  "meteojob":"Meteojob",' \
+          '  "adzuna":"Adzuna",' \
+          '  "alljobs":"AllJobs",' \
+          '  "linkedin":"LinkedIn",' \
+          '  "google_jobs":"Google for Jobs",' \
+          '  "lesjeudis":"Les Jeudis",' \
+          '  "leboncoin":"Le Bon Coin",' \
+          '  "manpower":"Manpower"' \
+          '}' \
+          '' \
+          'def pretty_source(s):' \
+          '    if not s: return "?"' \
+          '    return SRC_MAP.get(s.strip().lower(), s.strip().title())' \
+          '' \
+          'def get_company(it):' \
+          '    for k in ("company","employer","employer_name","entreprise","recruteur","societe","organisation"):' \
+          '        v = it.get(k) if isinstance(it, dict) else None' \
+          '        if isinstance(v, str) and v.strip(): return v.strip()' \
+          '    return "—"' \
+          '' \
+          'html = ["<h2>Offres saisonnières</h2>", "<ol>"]' \
+          'for it in items[:200]:' \
+          '    if not isinstance(it, dict): continue' \
+          '    src = pretty_source(it.get("source","?"))' \
+          '    title = (it.get("title") or "Offre").strip()' \
+          '    comp = get_company(it)' \
+          '    score = it.get("score","?")' \
+          '    url = (it.get("url") or "").strip() or (it.get("page_url") or "#").strip()' \
+          '    mail = (it.get("employer_email") or "").strip() or "—"' \
+          '    line = "{0}: {1} - {2} - Score: {3} - <a href=&quot;{4}&quot;>Lien</a> - {5}"' \
+          '    html.append("<li>" + line.format(src, title, comp, score, url, mail) + "</li>")' \
           'html.append("</ol>")' \
           '' \
           'msg = MIMEMultipart("alternative")' \
-          'msg["Subject"] = "Veille offres saisonnières (agrégées + annotées)"' \
+          'msg["Subject"] = "Veille offres saisonnières"' \
           'msg["From"] = SENDER' \
           'msg["To"] = RECIPIENT' \
           'msg.attach(MIMEText("\\n".join(html), "html", "utf-8"))' \
           '' \
           'with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as s:' \
-          '  s.starttls()' \
-          '  s.login(SMTP_USER, SMTP_PASS)' \
-          '  s.sendmail(SENDER, [x.strip() for x in RECIPIENT.split(",") if x.strip()], msg.as_string())' \
+          '  s.starttls(); s.login(SMTP_USER, SMTP_PASS)' \
+          '  s.sendmail(SMTP_USER, [x.strip() for x in RECIPIENT.split(",") if x.strip()], msg.as_string())' \
           'print("Email sent to", RECIPIENT)' \
           > email_report.py
+
 
 
       - name: Send email
