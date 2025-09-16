@@ -123,7 +123,12 @@ jobs:
           'offers = json.load(open("offers_raw.json","r",encoding="utf-8"))' \
           'filters = json.load(open("filters.json","r",encoding="utf-8"))' \
           '' \
-          'sys_prompt = {"role":"system","content":"Tu reçois des liens de recherche d\'offres saisonnières.\\nPour chaque lien, fais ceci:\\n1\'') Extraire toutes les annonces listées.\\n2\\) Pour chaque annonce, récupère le titre, le lien direct, le numéro d\'offre \(id\) si présent et l\'email de contact employeur s\'il existe.\\n3\'') Applique un score 0-100 basé sur: logement disponible, localisation France métropolitaine, durée entre 7 et 92 jours, métiers autorisés.\\nRetourne uniquement du JSON strict au format {{offers:[{{title,source,url,offer_id,employer_email,score,note}}]}}."}' \
+          'sys_prompt = {"role":"system","content": """Tu recois des liens de recherche d offres saisonnieres.' \
+          'Pour chaque lien, fais ceci:' \
+          '1) Extraire toutes les annonces listees.' \
+          '2) Pour chaque annonce, recuperer le titre, le lien direct, le numero d offre (id) s il est present, et l email de contact employeur s il existe.' \
+          '3) Appliquer un score 0-100 base sur: logement disponible (priorite), localisation France metropolitaine (pas Corse ni DOM-COM), duree entre 7 et 92 jours, metiers autorises.' \
+          'Retourner uniquement du JSON strict au format {offers:[{title,source,url,offer_id,employer_email,score,note}]}."""}' \
           '' \
           '@backoff.on_exception(' \
           '  backoff.expo,' \
@@ -155,7 +160,7 @@ jobs:
           '    data = json.loads(content)' \
           '    part_offers = data.get("offers", [])' \
           '  except Exception:' \
-          '    part_offers = [{"title":"(parse error)","source":"gpt","url":"#","note":"Réponse non JSON","score":0}]' \
+          '    part_offers = [{"title":"(parse error)","source":"gpt","url":"#","note":"Reponse non JSON","score":0}]' \
           '  aggregated.extend(part_offers)' \
           '  print(f"Chunk {idx}: +{len(part_offers)} items")' \
           '' \
@@ -163,11 +168,9 @@ jobs:
           'json.dump(out, open("offers_filtered.json","w",encoding="utf-8"), ensure_ascii=False, indent=2)' \
           'print("Done. Total items:", len(aggregated))' \
           > filter_with_gpt.py
-
-      - name: Run filtering (GPT-5 mini)
+          python filter_with_gpt.py
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-        run: python filter_with_gpt.py
 
       # ---- Étape 3: Email rapport enrichi ----
       - name: Write email_report.py
@@ -186,7 +189,7 @@ jobs:
           '' \
           'data = json.load(open("offers_filtered.json","r",encoding="utf-8"))' \
           '' \
-          'html = ["<h2>Offres saisonnières - Rapport</h2>", "<ol>"]' \
+          'html = ["<h2>Offres saisonnieres - Rapport</h2>", "<ol>"]' \
           'for item in data.get("offers", [])[:200]:' \
           '    title = item.get("title", "Offre")' \
           '    url = item.get("url", "#")' \
@@ -197,18 +200,18 @@ jobs:
           '    mail = item.get("employer_email", "")' \
           '' \
           '    extra = []' \
-          "    if oid: extra.append(f'ID: {oid}')" \
-          "    if mail: extra.append(f'Contact: <a href=\"mailto:{mail}\">{mail}</a>')" \
+          '    if oid: extra.append(f"ID: {oid}")' \
+          '    if mail: extra.append(f"<span>Contact: <a href=\\"mailto:{mail}\\">{mail}</a></span>")' \
           '' \
-          "    extra_html = ' — '.join(extra)" \
-          "    if extra_html: extra_html = ' — ' + extra_html" \
+          '    extra_html = " — ".join(extra)' \
+          '    if extra_html: extra_html = " — " + extra_html' \
           '' \
-          "    html.append(f\"<li><b>{title}</b> - {source} - Score: {score}{extra_html} - <a href=\\\"{url}\\\">Lien</a> - {note}</li>\")" \
+          '    html.append(f"<li><b>{title}</b> - {source} - Score: {score}{extra_html} - <a href=\\"{url}\\">Lien</a> - {note}</li>")' \
           '' \
           'html.append("</ol>")' \
           '' \
           'msg = MIMEMultipart("alternative")' \
-          'msg["Subject"] = "Veille offres saisonnières enrichie (GPT-5-mini)"' \
+          'msg["Subject"] = "Veille offres saisonnieres enrichie (GPT-5-mini)"' \
           'msg["From"] = SENDER' \
           'msg["To"] = RECIPIENT' \
           'msg.attach(MIMEText("\\n".join(html), "html", "utf-8"))' \
@@ -219,8 +222,7 @@ jobs:
           '    s.sendmail(SENDER, [x.strip() for x in RECIPIENT.split(",") if x.strip()], msg.as_string())' \
           'print("Email sent to", RECIPIENT)' \
           > email_report.py
-
-      - name: Send email
+          python email_report.py
         env:
           RECIPIENT_EMAIL: ${{ secrets.RECIPIENTS }}
           SENDER_EMAIL: ${{ secrets.SMTP_FROM }}
@@ -228,7 +230,6 @@ jobs:
           SMTP_PORT: ${{ secrets.SMTP_PORT }}
           SMTP_USER: ${{ secrets.SMTP_USER }}
           SMTP_PASS: ${{ secrets.SMTP_PASS }}
-        run: python email_report.py
 
       # ---- Étape 4: Artifacts pour debug ----
       - name: Upload artifacts
