@@ -272,7 +272,7 @@ jobs:
           '    print("ERROR:", e)' \
           '    sys.exit(1)' \
           > email_report.py
-          env:
+        env:
           RECIPIENT_EMAIL: ${{ secrets.RECIPIENTS }}
           SENDER_EMAIL: ${{ secrets.SMTP_FROM }}
           SMTP_HOST: ${{ secrets.SMTP_HOST }}
