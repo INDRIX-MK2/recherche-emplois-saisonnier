@@ -76,7 +76,7 @@ jobs:
           '}' > filters.json
           cat filters.json
 
-      # -------------- ÉTAPE 1: Seed links (brut) --------------
+      # -------------- ÉTAPE 1: URLs de recherche (seed) --------------
       - name: Write fetch_sites.py
         env:
           SEARCH_TERMS: ${{ github.event.inputs.search_terms }}
@@ -109,7 +109,59 @@ jobs:
           > fetch_sites.py
           python fetch_sites.py
 
-      # -------------- ÉTAPE 2: Extraction/Scoring par GPT-5-mini --------------
+      # -------------- ÉTAPE 1bis: Téléchargement HTML (brut, sans scraping fin) --------------
+      - name: Write fetch_html.py
+        run: |
+          printf '%s\n' \
+          'import json, re, requests, time' \
+          '' \
+          'HEADERS = {' \
+          '  "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",' \
+          '  "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",' \
+          '  "Accept-Language": "fr-FR,fr;q=0.9,en;q=0.8",' \
+          '  "Connection": "close"' \
+          '}' \
+          '' \
+          'def strip_js_css(html):' \
+          '    try:' \
+          '        html = re.sub("<script[\\s\\S]*?</script>", "", html, flags=re.IGNORECASE)' \
+          '        html = re.sub("<style[\\s\\S]*?</style>", "", html, flags=re.IGNORECASE)' \
+          '    except Exception:' \
+          '        pass' \
+          '    return html' \
+          '' \
+          'def fetch(url, session, timeout=25):' \
+          '    try:' \
+          '        r = session.get(url, headers=HEADERS, timeout=timeout, allow_redirects=True)' \
+          '        status = r.status_code' \
+          '        txt = r.text or ""' \
+          '    except Exception as e:' \
+          '        status = 0' \
+          '        txt = str(e)' \
+          '    return status, txt' \
+          '' \
+          'offers = json.load(open("offers_raw.json","r",encoding="utf-8"))' \
+          'session = requests.Session()' \
+          'out = []' \
+          '' \
+          'MAX_HTML = 200000' \
+          '' \
+          'for i, it in enumerate(offers, start=1):' \
+          '    url = it.get("url","")' \
+          '    source = it.get("source","")' \
+          '    title = it.get("title","")' \
+          '    status, html = fetch(url, session)' \
+          '    cleaned = strip_js_css(html)[:MAX_HTML]' \
+          '    out.append({"source":source,"title":title,"url":url,"status":status,"html":cleaned})' \
+          '    if i % 10 == 0:' \
+          '        time.sleep(1)' \
+          '' \
+          'json.dump(out, open("offers_pages.json","w",encoding="utf-8"), ensure_ascii=False, indent=2)' \
+          'print("Fetched pages:", len(out))' \
+          > fetch_html.py
+          python fetch_html.py
+
+      # -------------- ÉTAPE 2: Extraction/Scoring par GPT-5-mini (à partir du HTML) --------------
       - name: Write filter_with_gpt.py
         run: |
           printf '%s\n' \
@@ -127,15 +179,14 @@ jobs:
           '    raise RuntimeError("OPENAI_API_KEY is not set")' \
           'client = OpenAI(api_key=API_KEY, timeout=120.0, max_retries=2)' \
           '' \
-          'offers = json.load(open("offers_raw.json","r",encoding="utf-8"))' \
+          'pages = json.load(open("offers_pages.json","r",encoding="utf-8"))' \
           'filters = json.load(open("filters.json","r",encoding="utf-8"))' \
           '' \
-          'sys_prompt = {"role":"system","content": """Tu recois des liens de recherche d offres saisonnieres.' \
-          'Pour chaque lien, fais ceci:' \
-          '1) Extraire toutes les annonces listees.' \
-          '2) Pour chaque annonce, recuperer le titre, le lien direct, le numero d offre (id) s il est present, et l email de contact employeur s il existe.' \
-          '3) Appliquer un score 0-100 base sur: logement disponible (priorite), localisation France metropolitaine (pas Corse ni DOM-COM), duree entre 7 et 92 jours, metiers autorises.' \
-          'Retourner uniquement du JSON strict au format {"offers":[{"title":...,"source":...,"url":...,"offer_id":...,"employer_email":...,"score":...,"note":...}]}."""}' \
+          'sys_prompt = {"role":"system","content": """Tu recois des pages HTML de resultats ou de listes d offres.' \
+          'Parser le HTML fourni pour extraire plusieurs offres individuelles par page, sans inventer.' \
+          'Pour chaque offre, retourner: title, source, url, offer_id, employer_email, score, note.' \
+          'Scoring 0-100 (ordre d importance): logement disponible, localisation France metropolitaine (hors Corse et DOM COM), duree 7-92 jours, metier autorise (serveur, serveuse, runner, aide de salle, aide barman, commis de bar, vendangeur, porteuse, porteur, trieur, ouvrier agricole polyvalent, ouvrier de cave, aide caviste, employe polyvalent, employé polyvalent, cueilleur, cueilleuse).' \
+          'Sortie demandee: JSON strict {"offers":[{...}]}."""}' \
           '' \
           '@backoff.on_exception(' \
           '  backoff.expo,' \
@@ -159,8 +210,8 @@ jobs:
           '    yield lst[i:i+n]' \
           '' \
           'aggregated = []' \
-          'for idx, part in enumerate(chunks(offers, CHUNK_SIZE), start=1):' \
-          '  payload = {"filters": filters, "offers": part}' \
+          'for idx, part in enumerate(chunks(pages, CHUNK_SIZE), start=1):' \
+          '  payload = {"filters": filters, "pages": part}' \
           '  resp = call_openai(payload)' \
           '  content = resp.choices[0].message.content' \
           '  try:' \
@@ -229,13 +280,13 @@ jobs:
           '    if oid:' \
           '        extra.append("ID: {0}".format(oid))' \
           '    if mail:' \
-          '        extra.append("Contact: <a href=" "mailto:{0}" ">{0}</a>".format(mail))' \
+          '        extra.append("Contact: <a href=&quot;mailto:{0}&quot;>{0}</a>".format(mail))' \
           '' \
-          '    extra_html = " - ".join(extra)' \
+          '    extra_html = " — ".join(extra)' \
           '    if extra_html:' \
-          '        extra_html = " - " + extra_html' \
+          '        extra_html = " — " + extra_html' \
           '' \
-          '    html.append("<li><b>{0}</b> - {1} - Score: {2}{3} - <a href=" "{4}" ">Lien</a> - {5}</li>".format(title, source, score, extra_html, url, note))' \
+          '    html.append("<li><b>{0}</b> - {1} - Score: {2}{3} - <a href=&quot;{4}&quot;>Lien</a> - {5}</li>".format(title, source, score, extra_html, url, note))' \
           '' \
           'html.append("</ol>")' \
           '' \
@@ -296,4 +347,5 @@ jobs:
             sites.json
             filters.json
             offers_raw.json
+            offers_pages.json
             offers_filtered.json
