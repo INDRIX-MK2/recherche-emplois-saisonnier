@@ -265,7 +265,7 @@ jobs:
           '    link = build_offer_link(it)' \
           '' \
           '    # Affiche juste le mot URL cliquable' \
-          '    url_field = "<a href=\\"{0}\\">URL</a>".format(link) if link else "URL indisponible"' \
+          '    url_field = "<a href=\"{0}\">URL</a>".format(link) if link else "URL indisponible"' \
           '' \
           '    line = "{0}: {1} - {2} - Score: {3} - {4} - {5}"' \
           '    html.append("<li>" + line.format(src, title, comp, score, url_field, mail) + "</li>")' \
