@@ -21,26 +21,23 @@ jobs:
       TZ: Europe/Paris
       OPENAI_MODEL: gpt-5-mini
       OPENAI_TEMPERATURE: "1"
+      OPENAI_CHUNK_SIZE: "25"
 
     steps:
-      # 1. Récupération du repo
       - name: Checkout
         uses: actions/checkout@v4
 
-      # 2. Setup Python
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      # 3. Installer dépendances
       - name: Install deps
         run: |
           python -m pip install --upgrade pip
           pip install "httpx<0.28"
           pip install requests beautifulsoup4 lxml html5lib backoff "openai==1.51.0"
 
-      # 4. Vérifier l'heure locale pour éviter les doublons
       - name: Guard 09:00 Europe/Paris (éviter les doublons)
         env:
           GITHUB_EVENT_NAME: ${{ github.event_name }}
@@ -51,7 +48,6 @@ jobs:
             exit 0
           fi
 
-      # 5. Liste des sites à scanner
       - name: Write sites.json
         run: |
           printf '%s\n' \
@@ -60,7 +56,6 @@ jobs:
           ']' > sites.json
           cat sites.json
 
-      # 6. Filtres pour GPT
       - name: Write filters.json
         run: |
           printf '%s\n' \
@@ -80,7 +75,6 @@ jobs:
           '}' > filters.json
           cat filters.json
 
-      # 7. Script collecte brute
       - name: Write fetch_sites.py
         run: |
           printf '%s\n' \
@@ -105,50 +99,62 @@ jobs:
           > fetch_sites.py
           python fetch_sites.py
 
-      # 8. GPT-5-mini avec retry et backoff
       - name: Write filter_with_gpt.py
         run: |
           printf '%s\n' \
-          'import json, os, time' \
-          'import backoff' \
-          'import httpx' \
+          'import json, os' \
+          'import backoff, httpx' \
           'from openai import OpenAI' \
-          'from openai import APIConnectionError, RateLimitError, APIStatusError' \
+          'from openai import APIConnectionError, RateLimitError, APIStatusError, APITimeoutError' \
           '' \
-          '# Configuration OpenAI - modèle forcé GPT-5-mini' \
-          'client = OpenAI(timeout=60.0, max_retries=2)' \
-          'model = os.getenv("OPENAI_MODEL","gpt-5-mini")' \
-          'temperature = float(os.getenv("OPENAI_TEMPERATURE","1"))' \
+          'MODEL = os.getenv("OPENAI_MODEL","gpt-5-mini")' \
+          'TEMP = float(os.getenv("OPENAI_TEMPERATURE","1"))' \
+          'CHUNK_SIZE = int(os.getenv("OPENAI_CHUNK_SIZE","25"))' \
+          '' \
+          'client = OpenAI(timeout=120.0, max_retries=2)' \
           '' \
           'offers = json.load(open("offers_raw.json","r",encoding="utf-8"))' \
           'filters = json.load(open("filters.json","r",encoding="utf-8"))' \
           '' \
-          'sys_prompt = {"role":"system","content":"Tu filtres des offres. Ne supprime rien. Classe et annote avec un score basé sur logement>lieu (métropole sans Corse/DOM-COM)>durée (7-92j)>métier. Réponds JSON {offers:[...] }."}' \
-          'user_payload = {"filters":filters,"offers":offers}' \
+          'sys_prompt = {"role":"system","content":"Tu filtres des offres. NE SUPPRIME RIEN. Pour chaque offre, ajoute un score (0-100) basé sur: 1) logement (priorité max), 2) lieu (France métropolitaine, sans Corse/DOM-COM), 3) durée (7-92 jours), 4) métier (dans la liste). Réponds en JSON strict {offers:[{...}]}. Court et structuré."}' \
           '' \
-          '# Backoff exponentiel jusqu à 6 tentatives' \
           '@backoff.on_exception(' \
           '  backoff.expo,' \
-          '  (APIConnectionError, httpx.RemoteProtocolError, httpx.ConnectError, httpx.ReadTimeout, RateLimitError, APIStatusError),' \
+          '  (APIConnectionError, httpx.RemoteProtocolError, httpx.ConnectError, httpx.ReadTimeout, RateLimitError, APIStatusError, APITimeoutError),' \
           '  max_tries=6,' \
           '  jitter=backoff.full_jitter' \
           ')' \
-          'def call_openai():' \
+          'def call_openai(payload):' \
           '  return client.chat.completions.create(' \
-          '    model=model,' \
-          '    temperature=temperature,' \
-          '    messages=[sys_prompt, {"role":"user","content":json.dumps(user_payload, ensure_ascii=False)}]' \
+          '    model=MODEL,' \
+          '    temperature=TEMP,' \
+          '    response_format={"type":"json_object"},' \
+          '    messages=[' \
+          '      sys_prompt,' \
+          '      {"role":"user","content": json.dumps(payload, ensure_ascii=False)}' \
+          '    ]' \
           '  )' \
           '' \
-          'resp = call_openai()' \
-          'content = resp.choices[0].message.content' \
-          'try:' \
-          '  data = json.loads(content)' \
-          'except Exception:' \
-          '  data = {"offers": offers, "raw_response": content}' \
+          'def chunks(lst, n):' \
+          '  for i in range(0, len(lst), n):' \
+          '    yield lst[i:i+n]' \
           '' \
-          'json.dump(data, open("offers_filtered.json","w",encoding="utf-8"), ensure_ascii=False, indent=2)' \
-          'print("Filtered summary written.")' \
+          'aggregated = []' \
+          'for idx, part in enumerate(chunks(offers, CHUNK_SIZE), start=1):' \
+          '  payload = {"filters": filters, "offers": part}' \
+          '  resp = call_openai(payload)' \
+          '  content = resp.choices[0].message.content' \
+          '  try:' \
+          '    data = json.loads(content)' \
+          '    part_offers = data.get("offers", [])' \
+          '  except Exception:' \
+          '    part_offers = [{"title":"(parse error)","source":"gpt","url":"#","note":"Réponse non JSON","score":0}]' \
+          '  aggregated.extend(part_offers)' \
+          '  print(f"Chunk {idx}: +{len(part_offers)} items")' \
+          '' \
+          'out = {"offers": aggregated}' \
+          'json.dump(out, open("offers_filtered.json","w",encoding="utf-8"), ensure_ascii=False, indent=2)' \
+          'print("Done. Total items:", len(aggregated))' \
           > filter_with_gpt.py
 
       - name: Run filtering (GPT-5 mini)
@@ -156,7 +162,6 @@ jobs:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: python filter_with_gpt.py
 
-      # 9. Génération email
       - name: Write email_report.py
         run: |
           printf '%s\n' \
@@ -207,7 +212,6 @@ jobs:
           SMTP_PASS: ${{ secrets.SMTP_PASS }}
         run: python email_report.py
 
-      # 10. Sauvegarde des fichiers
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
