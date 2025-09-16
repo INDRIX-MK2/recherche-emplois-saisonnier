@@ -225,7 +225,7 @@ jobs:
           '    mail = (it.get("employer_email") or "—").strip()' \
           '    link = build_offer_link(it)' \
           '' \
-          '    url_field = "<a href=\\"{0}\\">URL</a>".format(link) if link else "URL indisponible"' \
+          '    url_field = "<a href=\"{0}\">URL</a>".format(link) if link else "URL indisponible"' \
           '' \
           '    html.append(f"<li>{src}: {title} - {company} - Score: {score} - {url_field} - {mail}</li>")' \
           '' \
