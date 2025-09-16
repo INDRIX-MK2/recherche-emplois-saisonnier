@@ -200,13 +200,16 @@ jobs:
           '    mail = item.get("employer_email", "")' \
           '' \
           '    extra = []' \
-          '    if oid: extra.append(f"ID: {oid}")' \
-          '    if mail: extra.append(f"<span>Contact: <a href=\\"mailto:{mail}\\">{mail}</a></span>")' \
+          '    if oid:' \
+          '        extra.append("ID: {0}".format(oid))' \
+          '    if mail:' \
+          '        extra.append("Contact: <a href=\\"mailto:{0}\\">{0}</a>".format(mail))' \
           '' \
           '    extra_html = " — ".join(extra)' \
-          '    if extra_html: extra_html = " — " + extra_html' \
+          '    if extra_html:' \
+          '        extra_html = " — " + extra_html' \
           '' \
-          '    html.append(f"<li><b>{title}</b> - {source} - Score: {score}{extra_html} - <a href=\\"{url}\\">Lien</a> - {note}</li>")' \
+          '    html.append("<li><b>{0}</b> - {1} - Score: {2}{3} - <a href=\\"{4}\\">Lien</a> - {5}</li>".format(title, source, score, extra_html, url, note))' \
           '' \
           'html.append("</ol>")' \
           '' \
@@ -222,7 +225,6 @@ jobs:
           '    s.sendmail(SENDER, [x.strip() for x in RECIPIENT.split(",") if x.strip()], msg.as_string())' \
           'print("Email sent to", RECIPIENT)' \
           > email_report.py
-          python email_report.py
         env:
           RECIPIENT_EMAIL: ${{ secrets.RECIPIENTS }}
           SENDER_EMAIL: ${{ secrets.SMTP_FROM }}
