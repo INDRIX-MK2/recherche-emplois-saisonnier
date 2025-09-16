@@ -164,7 +164,7 @@ jobs:
       - name: Write email_report.py
         run: |
           printf '%s\n' \
-          'import os, smtplib, json, sys' \
+          'import os, smtplib, json, sys, re' \
           'from urllib.parse import urlparse, parse_qs' \
           'from email.mime.multipart import MIMEMultipart' \
           'from email.mime.text import MIMEText' \
@@ -176,7 +176,7 @@ jobs:
           'SMTP_USER = os.getenv("SMTP_USER")' \
           'SMTP_PASS = os.getenv("SMTP_PASS")' \
           '' \
-          '# Charge d abord filtered, sinon raw pour fallback' \
+          '# Charge d abord filtered, sinon raw' \
           'data = {}' \
           'for path in ("offers_filtered.json","offers_raw.json"):' \
           '    try:' \
@@ -204,6 +204,12 @@ jobs:
           '    if not s: return "?"' \
           '    return SRC_MAP.get(s.strip().lower(), s.strip().title())' \
           '' \
+          'def strip_source_prefix(title, source):' \
+          '    if not title or not source: return title' \
+          '    pat = r"^\\s*" + re.escape(source) + r"\\s*[:\\-–—|]\\s*"' \
+          '    t2 = re.sub(pat, "", title.strip(), flags=re.IGNORECASE)' \
+          '    return t2 if t2 else title' \
+          '' \
           'def get_company(it):' \
           '    for k in ("company","employer","employer_name","entreprise","recruteur","societe","organisation"):' \
           '        v = it.get(k) if isinstance(it, dict) else None' \
@@ -229,16 +235,12 @@ jobs:
           '    url = (it.get("url") or "").strip()' \
           '    page_url = (it.get("page_url") or "").strip()' \
           '    oid = (it.get("offer_id") or "").strip()' \
-          '    # 1) lien explicite' \
           '    if offer_url and not is_search_or_list(offer_url):' \
           '        return offer_url' \
-          '    # 2) url deja direct' \
           '    if url and not is_search_or_list(url):' \
           '        return url' \
-          '    # 3) reconstruction par source' \
           '    if src_raw == "francetravail" and oid:' \
           '        return "https://candidat.francetravail.fr/offres/recherche/detail/{0}".format(oid)' \
-          '    # 4) indeed: si page_url contient param jk' \
           '    if page_url:' \
           '        try:' \
           '            u = urlparse(page_url)' \
@@ -248,7 +250,6 @@ jobs:
           '                    return "https://{0}/viewjob?jk={1}".format(u.netloc, jk)' \
           '        except Exception:' \
           '            pass' \
-          '    # sinon: pas de lien d offre fiable' \
           '    return ""' \
           '' \
           'html = ["<h2>Offres saisonnières</h2>", "<ol>"]' \
@@ -256,17 +257,15 @@ jobs:
           '    if not isinstance(it, dict):' \
           '        continue' \
           '    src = pretty_source(it.get("source","?"))' \
-          '    title = (it.get("title") or "Offre").strip()' \
+          '    title_raw = (it.get("title") or "Offre").strip()' \
+          '    title = strip_source_prefix(title_raw, src)' \
           '    comp = get_company(it)' \
           '    score = it.get("score","?")' \
           '    mail = (it.get("employer_email") or "").strip() or "—"' \
           '    link = build_offer_link(it)' \
-          '    if link:' \
-          '        lien_html = "<a href=&quot;{0}&quot;>Lien</a>".format(link)' \
-          '    else:' \
-          '        lien_html = "Lien indisponible"' \
+          '    url_field = "<a href=\\"{0}\\">URL</a>".format(link) if link else "URL indisponible"' \
           '    line = "{0}: {1} - {2} - Score: {3} - {4} - {5}"' \
-          '    html.append("<li>" + line.format(src, title, comp, score, lien_html, mail) + "</li>")' \
+          '    html.append("<li>" + line.format(src, title, comp, score, url_field, mail) + "</li>")' \
           'html.append("</ol>")' \
           '' \
           'msg = MIMEMultipart("alternative")' \
@@ -280,7 +279,6 @@ jobs:
           '  s.sendmail(SMTP_USER, [x.strip() for x in RECIPIENT.split(",") if x.strip()], msg.as_string())' \
           'print("Email sent to", RECIPIENT)' \
           > email_report.py
-
 
 
 
