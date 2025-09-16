@@ -123,7 +123,7 @@ jobs:
           'offers = json.load(open("offers_raw.json","r",encoding="utf-8"))' \
           'filters = json.load(open("filters.json","r",encoding="utf-8"))' \
           '' \
-          'sys_prompt = {"role":"system","content":"Tu reçois des liens de recherche d\'offres saisonnières.\\nPour chaque lien, fais ceci:\\n1) Extraire toutes les annonces listées.\\n2) Pour chaque annonce, récupère le titre, le lien direct, le numéro d\'offre (id) si présent et l\'email de contact employeur s\'il existe.\\n3) Applique un score 0-100 basé sur: logement disponible, localisation France métropolitaine, durée entre 7 et 92 jours, métiers autorisés.\\nRetourne uniquement du JSON strict au format {offers:[{title,source,url,offer_id,employer_email,score,note}]}."}' \
+          'sys_prompt = {"role":"system","content":"Tu reçois des liens de recherche d\'offres saisonnières.\\nPour chaque lien, fais ceci:\\n1\'') Extraire toutes les annonces listées.\\n2\\) Pour chaque annonce, récupère le titre, le lien direct, le numéro d\'offre \(id\) si présent et l\'email de contact employeur s\'il existe.\\n3\'') Applique un score 0-100 basé sur: logement disponible, localisation France métropolitaine, durée entre 7 et 92 jours, métiers autorisés.\\nRetourne uniquement du JSON strict au format {{offers:[{{title,source,url,offer_id,employer_email,score,note}}]}}."}' \
           '' \
           '@backoff.on_exception(' \
           '  backoff.expo,' \
