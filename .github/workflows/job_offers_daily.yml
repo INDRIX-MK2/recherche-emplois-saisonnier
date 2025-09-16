@@ -52,7 +52,7 @@ jobs:
         run: |
           printf '%s\n' \
           '[' \
-          '  "francetravail","indeed","hellowork","jobijoba","meteojob","keljob","adzuna","alljobs","jora","jobted","linkedin","google_jobs","apec","wttj","lesjeudis","jobteaser","jobsthatsense","chooseyourboss","leboncoin","manpower","ouestjob"' \
+          '  "francetravail","indeed","hellowork","meteojob","adzuna","alljobs","linkedin","google_jobs","lesjeudis","leboncoin","manpower"' \
           ']' > sites.json
           cat sites.json
 
