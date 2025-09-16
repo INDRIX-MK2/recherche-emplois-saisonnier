@@ -4,11 +4,10 @@ on:
   workflow_dispatch:
     inputs:
       search_terms:
-        description: "Mots-clés pour la recherche (ex: serveur logé, aide barman logé, vendanges logé)"
+        description: "Mots-clés (ex: serveur logé, aide barman logé, vendanges logé)"
         type: string
         required: true
         default: "serveur logé, aide barman logé, runner logé, vendanges logé, ouvrier cave logé, aide caviste logé, employé polyvalent logé, cueilleur logé"
-
   schedule:
     # 09:00 Europe/Paris = 07:00 UTC (été) et 08:00 UTC (hiver)
     - cron: "0 7 * * *"
@@ -75,7 +74,7 @@ jobs:
           '}' > filters.json
           cat filters.json
 
-      # --------- Collecte : liens directs + ID d'offre + employeur ---------
+      # --------- Collecte : liens directs + ID d'offre ---------
       - name: Write fetch_sites.py
         run: |
           printf '%s\n' \
@@ -136,7 +135,7 @@ jobs:
           '  html = fetch(url); out=[]' \
           '  if not html: return out' \
           '  soup = BeautifulSoup(html,"lxml")' \
-          '  for a in soup.select("a.tapItem"):' \
+          "  for a in soup.select('a.tapItem'):" \
           '    href = a.get("href") or ""' \
           '    if href and not href.startswith("http"): href = "https://fr.indeed.com"+href' \
           '    title = (a.select_one("h2 span") or a.select_one("h2")).get_text(strip=True) if a.select_one("h2") else "Offre Indeed"' \
@@ -149,7 +148,7 @@ jobs:
           '  html = fetch(url); out=[]' \
           '  if not html: return out' \
           '  soup = BeautifulSoup(html,"lxml")' \
-          '  for a in soup.select("a.card-offer--link"):' \
+          "  for a in soup.select('a.card-offer--link'):" \
           '    href = a.get("href") or ""' \
           '    if href.startswith("/"): href = "https://www.hellowork.com"+href' \
           '    title = a.get("title") or a.get_text(strip=True) or "Offre HelloWork"' \
@@ -161,7 +160,7 @@ jobs:
           '  html = fetch(url); out=[]' \
           '  if not html: return out' \
           '  soup = BeautifulSoup(html,"lxml")' \
-          '  for a in soup.select("a[href*=\\"/offres/recherche/detail/\\"]"):' \
+          "  for a in soup.select('a[href*=\"/offres/recherche/detail/\"]'):" \
           '    href = a.get("href")' \
           '    if href and href.startswith("/"): href = "https://candidat.francetravail.fr"+href' \
           '    title = a.get_text(strip=True) or "Offre France Travail"' \
@@ -173,7 +172,7 @@ jobs:
           '  html = fetch(url); out=[]' \
           '  if not html: return out' \
           '  soup = BeautifulSoup(html,"lxml")' \
-          '  for a in soup.select("a[href*=\\"/offre-emploi/\\"]"):' \
+          "  for a in soup.select('a[href*=\"/offre-emploi/\"]'):" \
           '    href = a.get("href")' \
           '    title = a.get("title") or a.get_text(strip=True) or "Offre Monster"' \
           '    out.append({"source":"monster","url":href,"title":title,"offer_id":guess_id(href)})' \
@@ -184,7 +183,7 @@ jobs:
           '  html = fetch(g); out=[]' \
           '  if not html: return out' \
           '  soup = BeautifulSoup(html,"lxml")' \
-          '  for a in soup.select("a"):' \
+          "  for a in soup.select('a'):" \
           '    href = a.get("href") or ""' \
           '    if href.startswith("http") and domain in href:' \
           '      title = a.get_text(strip=True) or f"{domain} result"' \
@@ -205,7 +204,7 @@ jobs:
           > fetch_sites.py
           python fetch_sites.py
 
-      # --------- Enrichissement : email employeur depuis la fiche ---------
+      # --------- Enrichissement : e-mail employeur depuis la fiche ---------
       - name: Write enrich_offers.py
         run: |
           printf '%s\n' \
@@ -233,7 +232,7 @@ jobs:
           '    html = fetch(url)' \
           '    if html:' \
           '      soup = BeautifulSoup(html,"lxml")' \
-          '      a = soup.select_one("a[href^=\\"mailto:\\"]")' \
+          "      a = soup.select_one('a[href^=\"mailto:\"]')" \
           '      if a:' \
           '        email = (a.get("href","").replace("mailto:","").strip())' \
           '      if not email:' \
