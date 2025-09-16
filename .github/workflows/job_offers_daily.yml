@@ -52,7 +52,7 @@ jobs:
         run: |
           printf '%s\n' \
           '[' \
-          '  "francetravail","indeed","hellowork","meteojob","adzuna","alljobs","linkedin","google_jobs","lesjeudis","leboncoin","manpower"' \
+          '  "francetravail","indeed","hellowork","meteojob","keljob","adzuna","alljobs","linkedin","google_jobs","lesjeudis","jobteaser","leboncoin","manpower"' \
           ']' > sites.json
           cat sites.json
 
@@ -82,9 +82,9 @@ jobs:
           'SITES = json.load(open("sites.json","r",encoding="utf-8"))' \
           'TERMS = os.getenv("SEARCH_TERMS","").strip() or "${{ github.event.inputs.search_terms }}"' \
           'def q(s): return requests.utils.quote(s)' \
-          'def results_indeed(t): return [{"source":"indeed","url":f"https://fr.indeed.com/jobs?q={q(t)}+log%C3%A9&l=France","title":"Indeed: "+t}]' \
-          'def results_hellowork(t): return [{"source":"hellowork","url":f"https://www.hellowork.com/fr-fr/emploi/recherche.html?k={q(t)}+logement","title":"HelloWork: "+t}]' \
-          'def results_francetravail(t): return [{"source":"francetravail","url":f"https://candidat.francetravail.fr/offres/recherche?k={q(t)}&l=France","title":"France Travail: "+t}]' \
+          'def results_indeed(t): return [{"source":"indeed","url":f"https://fr.indeed.com/jobs?q={q(t)}+log%C3%A9&l=France","title":"Indeed search: "+t}]' \
+          'def results_hellowork(t): return [{"source":"hellowork","url":f"https://www.hellowork.com/fr-fr/emploi/recherche.html?k={q(t)}+logement","title":"HelloWork : "+t}]' \
+          'def results_francetravail(t): return [{"source":"francetravail","url":f"https://candidat.francetravail.fr/offres/recherche?k={q(t)}&l=France","title":"France Travail : "+t}]' \
           'def results_simple(engine, t): return [{"source":engine,"url":f"https://www.google.com/search?q=site%3A{engine}.com+{q(t)}+log%C3%A9+France","title":engine+" via Google"}]' \
           'DISPATCH = {"indeed":results_indeed,"hellowork":results_hellowork,"francetravail":results_francetravail}' \
           'raw=[]' \
