@@ -18,7 +18,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       TZ: Europe/Paris
-      OPENAI_MODEL: gpt-4o-mini
+      OPENAI_MODEL: gpt-5-mini
       OPENAI_TEMPERATURE: "1"
 
     steps:
