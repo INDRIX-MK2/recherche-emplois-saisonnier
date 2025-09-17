@@ -112,7 +112,7 @@ jobs:
           "import re, json, requests, time, random" \
           "from urllib.parse import urljoin" \
           "HDR={\"User-Agent\":\"Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0 Safari/537.36\",\"Accept-Language\":\"fr-FR,fr;q=0.9\"}" \
-          "def fetch(url, limit=15):" \
+          "def fetch(url, limit=30):" \
           "    try:" \
           "        r=requests.get(url,headers=HDR,timeout=limit,allow_redirects=True)" \
           "        if r.status_code==200 and r.text:" \
