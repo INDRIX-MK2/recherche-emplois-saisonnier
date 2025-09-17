@@ -34,6 +34,7 @@ jobs:
 
       - name: Install deps
         run: |
+          set -euo pipefail
           python -m pip install --upgrade pip
           pip install "httpx<0.28"
           pip install requests beautifulsoup4 lxml html5lib backoff "openai==1.51.0"
@@ -42,6 +43,7 @@ jobs:
         env:
           GITHUB_EVENT_NAME: ${{ github.event_name }}
         run: |
+          set -euo pipefail
           NOW_HOUR="$(date +'%H')"
           if [ "$GITHUB_EVENT_NAME" = "schedule" ] && [ "$NOW_HOUR" != "09" ]; then
             echo "Skipping, current hour: $NOW_HOUR (target 09:00 Europe/Paris)"
@@ -51,278 +53,309 @@ jobs:
       # ---- Config ----
       - name: Write sites.json
         run: |
-          printf '%s\n' \
-          '[' \
-          '  "francetravail","indeed","hellowork","meteojob","adzuna","alljobs","linkedin","google_jobs","lesjeudis","leboncoin","manpower"' \
-          ']' > sites.json
+          set -euo pipefail
+          printf "%s\n" \
+          "[" \
+          "  \"francetravail\",\"indeed\",\"hellowork\",\"meteojob\",\"adzuna\",\"alljobs\",\"linkedin\",\"google_jobs\",\"lesjeudis\",\"leboncoin\",\"manpower\"" \
+          "]" > sites.json
           cat sites.json
 
       - name: Write filters.json
         run: |
-          printf '%s\n' \
-          '{' \
-          '  "must_have_housing": true,' \
-          '  "min_duration_days": 7,' \
-          '  "max_duration_days": 92,' \
-          '  "allow_only_metropole": true,' \
-          '  "exclude_corse": true,' \
-          '  "exclude_domcom": true,' \
-          '  "allowed_jobs": [' \
-          '    "serveur","serveuse","runner","aide de salle","aide barman","commis de bar",' \
-          '    "vendangeur","porteuse","porteur","trieur","ouvrier agricole polyvalent",' \
-          '    "ouvrier de cave","aide caviste","employe polyvalent","employé polyvalent",' \
-          '    "cueilleur","cueilleuse"' \
-          '  ]' \
-          '}' > filters.json
+          set -euo pipefail
+          printf "%s\n" \
+          "{" \
+          "  'must_have_housing': true," \
+          "  'min_duration_days': 7," \
+          "  'max_duration_days': 92," \
+          "  'allow_only_metropole': true," \
+          "  'exclude_corse': true," \
+          "  'exclude_domcom': true," \
+          "  'allowed_jobs': [" \
+          "    'serveur','serveuse','runner','aide de salle','aide barman','commis de bar'," \
+          "    'vendangeur','porteuse','porteur','trieur','ouvrier agricole polyvalent'," \
+          "    'ouvrier de cave','aide caviste','employe polyvalent','employé polyvalent'," \
+          "    'cueilleur','cueilleuse'" \
+          "  ]" \
+          "}" > filters.json
           cat filters.json
 
-      # ---- Étape 1: Collecte brut (liens de recherche) ----
+      # ---- Étape 1: Collecte des liens de recherche ----
       - name: Write fetch_sites.py
         run: |
-          printf '%s\n' \
-          'import json, os, requests' \
-          'SITES = json.load(open("sites.json","r",encoding="utf-8"))' \
-          'TERMS = os.getenv("SEARCH_TERMS","").strip() or "${{ github.event.inputs.search_terms }}"' \
-          'def q(s): return requests.utils.quote(s)' \
-          'def results_indeed(t): return [{"source":"indeed","url":f"https://fr.indeed.com/jobs?q={q(t)}+log%C3%A9&l=France","title":" : "+t}]' \
-          'def results_hellowork(t): return [{"source":"hellowork","url":f"https://www.hellowork.com/fr-fr/emploi/recherche.html?k={q(t)}+logement","title":" : "+t}]' \
-          'def results_francetravail(t): return [{"source":"francetravail","url":f"https://candidat.francetravail.fr/offres/recherche?k={q(t)}&l=France","title":" : "+t}]' \
-          'def results_simple(engine, t): return [{"source":engine,"url":f"https://www.google.com/search?q=site%3A{engine}.com+{q(t)}+log%C3%A9+France","title":" via Google"}]' \
-          'DISPATCH = {"indeed":results_indeed,"hellowork":results_hellowork,"francetravail":results_francetravail}' \
-          'raw=[]' \
-          'terms=[x.strip() for x in TERMS.split(",") if x.strip()] or ["serveur logé","aide barman logé","runner logé","vendanges logé","ouvrier cave logé","aide caviste logé","employé polyvalent logé","cueilleur logé"]' \
-          'for site in SITES:' \
-          '  for t in terms:' \
-          '    fn=DISPATCH.get(site)' \
-          '    raw.extend(fn(t) if fn else results_simple(site,t))' \
-          'json.dump(raw, open("offers_raw.json","w",encoding="utf-8"), ensure_ascii=False, indent=2)' \
-          'print("Collected seeds:", len(raw))' \
+          set -euo pipefail
+          printf "%s\n" \
+          "import json, os, requests" \
+          "SITES = json.load(open('sites.json','r',encoding='utf-8'))" \
+          "TERMS = os.getenv('SEARCH_TERMS','').strip() or \"${{ github.event.inputs.search_terms }}\"" \
+          "def q(s): return requests.utils.quote(s)" \
+          "" \
+          "def results_indeed(t):" \
+          "    return [{'source':'indeed','url':f'https://fr.indeed.com/jobs?q={q(t)}+log%C3%A9&l=France','title':'Indeed search: '+t}]" \
+          "def results_hellowork(t):" \
+          "    return [{'source':'hellowork','url':f'https://www.hellowork.com/fr-fr/emploi/recherche.html?k={q(t)}+logement','title':'HelloWork : '+t}]" \
+          "def results_francetravail(t):" \
+          "    return [{'source':'francetravail','url':f'https://candidat.francetravail.fr/offres/recherche?k={q(t)}&l=France','title':'France Travail : '+t}]" \
+          "def results_simple(engine, t):" \
+          "    return [{'source':engine,'url':f'https://www.google.com/search?q=site%3A{engine}.com+{q(t)}+log%C3%A9+France','title':engine+' via Google'}]" \
+          "" \
+          "DISPATCH = {'indeed':results_indeed,'hellowork':results_hellowork,'francetravail':results_francetravail}" \
+          "" \
+          "raw=[]" \
+          "terms=[x.strip() for x in TERMS.split(',') if x.strip()] or ['serveur logé','aide barman logé','runner logé','vendanges logé','ouvrier cave logé','aide caviste logé','employé polyvalent logé','cueilleur logé']" \
+          "for site in SITES:" \
+          "  for t in terms:" \
+          "    fn=DISPATCH.get(site)" \
+          "    raw.extend(fn(t) if fn else results_simple(site,t))" \
+          "json.dump(raw, open('offers_raw.json','w',encoding='utf-8'), ensure_ascii=False, indent=2)" \
+          "print('Collected seeds:', len(raw))" \
           > fetch_sites.py
           python fetch_sites.py
 
-      # ---- Étape 2: GPT-5 (scoring/normalisation, on ne supprime rien) ----
+      - name: Debug workspace (after fetch)
+        run: |
+          set -euo pipefail
+          pwd
+          ls -la
+
+      # ---- Étape 2: GPT-5 scoring/normalisation (NE SUPPRIME RIEN) ----
       - name: Write filter_with_gpt.py
         run: |
-          printf '%s\n' \
-          'import json, os' \
-          'import backoff, httpx' \
-          'from openai import OpenAI' \
-          'from openai import APIConnectionError, RateLimitError, APIStatusError, APITimeoutError' \
-          '' \
-          'MODEL = os.getenv("OPENAI_MODEL","gpt-5")' \
-          'TEMP = float(os.getenv("OPENAI_TEMPERATURE","1"))' \
-          'CHUNK_SIZE = int(os.getenv("OPENAI_CHUNK_SIZE","20"))' \
-          '' \
-          'client = OpenAI(timeout=httpx.Timeout(180.0, connect=30.0, read=180.0, write=180.0), max_retries=2)' \
-          '' \
-          'offers = json.load(open("offers_raw.json","r",encoding="utf-8"))' \
-          'filters = json.load(open("filters.json","r",encoding="utf-8"))' \
-          '' \
-          'sys_prompt = {' \
-          '  "role":"system",' \
-          '  "content":"Tu filtres des offres. NE SUPPRIME RIEN. Pour chaque offre, ajoute un score (0-100) basé sur: 1) logement (priorité max), 2) lieu (France métropolitaine, sans Corse/DOM-COM), 3) durée (7-92 jours), 4) métier (dans la liste). Réponds en JSON strict {offers:[{title,source,url,offer_id,employer_email,company,score,note}]}. Court et structuré."' \
-          '}' \
-          '' \
-          '@backoff.on_exception(' \
-          '  backoff.expo,' \
-          '  (APIConnectionError, httpx.RemoteProtocolError, httpx.ConnectError, httpx.ReadTimeout, RateLimitError, APIStatusError, APITimeoutError),' \
-          '  max_tries=8,' \
-          '  jitter=backoff.full_jitter' \
-          ')' \
-          'def call_openai(payload):' \
-          '  return client.chat.completions.create(' \
-          '    model=MODEL,' \
-          '    temperature=TEMP,' \
-          '    response_format={"type":"json_object"},' \
-          '    messages=[' \
-          '      sys_prompt,' \
-          '      {"role":"user","content": json.dumps(payload, ensure_ascii=False)}' \
-          '    ]' \
-          '  )' \
-          '' \
-          'def chunks(lst, n):' \
-          '  for i in range(0, len(lst), n):' \
-          '    yield lst[i:i+n]' \
-          '' \
-          'def process_part(part, depth=0):' \
-          '  payload = {"filters": filters, "offers": part}' \
-          '  try:' \
-          '    resp = call_openai(payload)' \
-          '    content = resp.choices[0].message.content' \
-          '    data = json.loads(content)' \
-          '    return data.get("offers", [])' \
-          '  except APITimeoutError:' \
-          '    # Si ça time-out, on coupe le lot et on réessaie (2 niveaux max), sinon on fallback' \
-          '    if len(part) > 5 and depth < 2:' \
-          '      mid = len(part)//2' \
-          '      return process_part(part[:mid], depth+1) + process_part(part[mid:], depth+1)' \
-          '    else:' \
-          '      return [{' \
-          '        "title": p.get("title","(timeout)"),' \
-          '        "source": p.get("source","gpt"),' \
-          '        "url": p.get("url","#"),' \
-          '        "note": "Timeout GPT : fallback minimal",' \
-          '        "score": 0' \
-          '      } for p in part]' \
-          '  except Exception:' \
-          '    return [{"title":"(parse error)","source":"gpt","url":"#","note":"Réponse non JSON","score":0}]' \
-          '' \
-          'aggregated = []' \
-          'for idx, part in enumerate(chunks(offers, CHUNK_SIZE), start=1):' \
-          '  part_offers = process_part(part)' \
-          '  aggregated.extend(part_offers)' \
-          '  print(f"Chunk {idx}: +{len(part_offers)} items")' \
-          '' \
-          'out = {"offers": aggregated}' \
-          'json.dump(out, open("offers_filtered.json","w",encoding="utf-8"), ensure_ascii=False, indent=2)' \
-          'print("Done. Total items:", len(aggregated))'
+          set -euo pipefail
+          printf "%s\n" \
+          "import json, os" \
+          "import backoff, httpx" \
+          "from openai import OpenAI" \
+          "from openai import APIConnectionError, RateLimitError, APIStatusError, APITimeoutError" \
+          "" \
+          "MODEL = os.getenv('OPENAI_MODEL','gpt-5')" \
+          "TEMP = float(os.getenv('OPENAI_TEMPERATURE','1'))" \
+          "CHUNK_SIZE = int(os.getenv('OPENAI_CHUNK_SIZE','20'))" \
+          "" \
+          "client = OpenAI(timeout=httpx.Timeout(180.0, connect=30.0, read=180.0, write=180.0), max_retries=2)" \
+          "" \
+          "offers = json.load(open('offers_raw.json','r',encoding='utf-8'))" \
+          "filters = json.load(open('filters.json','r',encoding='utf-8'))" \
+          "" \
+          "sys_prompt = {" \
+          "  'role':'system'," \
+          "  'content':'Tu filtres des offres. NE SUPPRIME RIEN. Pour chaque offre, ajoute un score (0-100) basé sur: 1) logement (priorité max), 2) lieu (France métropolitaine, sans Corse/DOM-COM), 3) durée (7-92 jours), 4) métier (dans la liste). Réponds en JSON strict {offers:[{title,source,url,offer_id,employer_email,company,score,note}]}. Court et structuré.'" \
+          "}" \
+          "" \
+          "@backoff.on_exception(" \
+          "  backoff.expo," \
+          "  (APIConnectionError, httpx.RemoteProtocolError, httpx.ConnectError, httpx.ReadTimeout, RateLimitError, APIStatusError, APITimeoutError)," \
+          "  max_tries=8," \
+          "  jitter=backoff.full_jitter" \
+          ")" \
+          "def call_openai(payload):" \
+          "  return client.chat.completions.create(" \
+          "    model=MODEL," \
+          "    temperature=TEMP," \
+          "    response_format={'type':'json_object'}," \
+          "    messages=[" \
+          "      sys_prompt," \
+          "      {'role':'user','content': json.dumps(payload, ensure_ascii=False)}" \
+          "    ]" \
+          "  )" \
+          "" \
+          "def chunks(lst, n):" \
+          "  for i in range(0, len(lst), n):" \
+          "    yield lst[i:i+n]" \
+          "" \
+          "def process_part(part, depth=0):" \
+          "  payload = {'filters': filters, 'offers': part}" \
+          "  try:" \
+          "    resp = call_openai(payload)" \
+          "    content = resp.choices[0].message.content" \
+          "    data = json.loads(content)" \
+          "    return data.get('offers', [])" \
+          "  except APITimeoutError:" \
+          "    if len(part) > 5 and depth < 2:" \
+          "      mid = len(part)//2" \
+          "      return process_part(part[:mid], depth+1) + process_part(part[mid:], depth+1)" \
+          "    else:" \
+          "      return [{" \
+          "        'title': p.get('title','(timeout)')," \
+          "        'source': p.get('source','gpt')," \
+          "        'url': p.get('url','#')," \
+          "        'note': 'Timeout GPT : fallback minimal'," \
+          "        'score': 0" \
+          "      } for p in part]" \
+          "  except Exception:" \
+          "    return [{'title':'(parse error)','source':'gpt','url':'#','note':'Réponse non JSON','score':0}]" \
+          "" \
+          "aggregated = []" \
+          "for idx, part in enumerate(chunks(offers, CHUNK_SIZE), start=1):" \
+          "  part_offers = process_part(part)" \
+          "  aggregated.extend(part_offers)" \
+          "  print(f'Chunk {idx}: +{len(part_offers)} items')" \
+          "" \
+          "out = {'offers': aggregated}" \
+          "json.dump(out, open('offers_filtered.json','w',encoding='utf-8'), ensure_ascii=False, indent=2)" \
+          "print('Done. Total items:', len(aggregated))" \
+          > filter_with_gpt.py
+
+      - name: Assert filter_with_gpt.py exists
+        run: |
+          set -euo pipefail
+          test -f filter_with_gpt.py
+          echo "filter_with_gpt.py present:"
+          wc -l filter_with_gpt.py | awk '{print $1" lines"}'
+          head -n 20 filter_with_gpt.py
 
       - name: Run filtering (GPT-5)
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-        run: python filter_with_gpt.py
+        run: |
+          set -euo pipefail
+          python filter_with_gpt.py
 
       # ---- Étape 3: Scraping des pages d'offre (best-effort) ----
       - name: Write scrape_details.py
         run: |
-          printf '%s\n' \
-          'import os, re, json, time, random, requests' \
-          'from bs4 import BeautifulSoup' \
-          '' \
-          'HEADERS = {' \
+          set -euo pipefail
+          printf "%s\n" \
+          "import os, re, json, time, random, requests" \
+          "from bs4 import BeautifulSoup" \
+          "" \
+          "HEADERS = {" \
           "  'User-Agent':'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0 Safari/537.36'," \
           "  'Accept-Language':'fr-FR,fr;q=0.9,en-US;q=0.8,en;q=0.7'" \
-          '}' \
-          '' \
-          'def build_offer_link(it):' \
+          "}" \
+          "" \
+          "def build_offer_link(it):" \
           "    for k in ('offer_url','url','page_url'):" \
-          '        v = (it.get(k) or "").strip()' \
-          '        if v:' \
-          '            return v' \
-          '    src_raw = (it.get("source") or "").strip().lower()' \
-          '    oid = (it.get("offer_id") or "").strip()' \
-          '    if src_raw == "francetravail" and oid:' \
-          '        return f"https://candidat.francetravail.fr/offres/recherche/detail/{oid}"' \
-          '    return ""' \
-          '' \
-          'EMAIL_RE = re.compile(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", re.I)' \
-          'PHONE_RE = re.compile(r"(?:\+33|0)\s?[1-9](?:[\s\.-]?\d{2}){4}")' \
-          'SALARY_RE = re.compile(r"(\d[\d\s]{2,}(?:\s?€)|SMIC|brut|net|mensuel|horaire)", re.I)' \
-          'CONTRACT_RE = re.compile(r"\b(CDD|CDI|Int[ée]rim|Saisonnier|Saison)\b", re.I)' \
-          'DUR_RE = re.compile(r"(\d+\s*(?:jour|jours|semaine|semaines|mois))", re.I)' \
-          'START_RE = re.compile(r"\b(?:d[ée]but|d[ée]marre|prise de poste|\bdu\b)\s*([0-3]?\d[\/\.-][01]?\d[\/\.-](?:20)?\d{2}|[A-Za-zéû]{3,}\s*\d{4}|[0-3]?\d\s+[A-Za-zéû]{3,})", re.I)' \
+          "        v = (it.get(k) or '').strip()" \
+          "        if v:" \
+          "            return v" \
+          "    src_raw = (it.get('source') or '').strip().lower()" \
+          "    oid = (it.get('offer_id') or '').strip()" \
+          "    if src_raw == 'francetravail' and oid:" \
+          "        return f'https://candidat.francetravail.fr/offres/recherche/detail/{oid}'" \
+          "    return ''" \
+          "" \
+          "EMAIL_RE = re.compile(r'[A-Z0-9._%+-]+@[A-Z0-9.-]+\\.[A-Z]{2,}', re.I)" \
+          "PHONE_RE = re.compile(r'(?:\\+33|0)\\s?[1-9](?:[\\s\\.-]?\\d{2}){4}')" \
+          "SALARY_RE = re.compile(r'(\\d[\\d\\s]{2,}(?:\\s?€)|SMIC|brut|net|mensuel|horaire)', re.I)" \
+          "CONTRACT_RE = re.compile(r'\\b(CDD|CDI|Int[ée]rim|Saisonnier|Saison)\\b', re.I)" \
+          "DUR_RE = re.compile(r'(\\d+\\s*(?:jour|jours|semaine|semaines|mois))', re.I)" \
+          "START_RE = re.compile(r'\\b(?:d[ée]but|d[ée]marre|prise de poste|\\bdu\\b)\\s*([0-3]?\\d[\\/\\.-][01]?\\d[\\/\\.-](?:20)?\\d{2}|[A-Za-zéû]{3,}\\s*\\d{4}|[0-3]?\\d\\s+[A-Za-zéû]{3,})', re.I)" \
           "HOUSING_HINTS = ['logé','logement','hébergement','hebergement','chambre','dortoir']" \
-          '' \
-          'def clean_text(s):' \
-          '    import html' \
-          '    return re.sub(r"\s+", " ", html.unescape(s)).strip() if isinstance(s, str) else s' \
-          '' \
-          'def extract_text_fields(soup):' \
-          '    parts = []' \
-          '    for t in soup.find_all(text=True):' \
-          '        txt = (t or "").strip()' \
-          '        if txt:' \
-          '            parts.append(txt)' \
-          '    return " ".join(parts)' \
-          '' \
-          'def parse_offer(html):' \
-          '    soup = BeautifulSoup(html, "lxml")' \
-          '    data = {}' \
-          '    # titre via meta og:title / h1 / <title>' \
+          "" \
+          "def clean_text(s):" \
+          "    import html" \
+          "    return re.sub(r'\\s+', ' ', html.unescape(s)).strip() if isinstance(s, str) else s" \
+          "" \
+          "def extract_text_fields(soup):" \
+          "    parts = []" \
+          "    for t in soup.find_all(text=True):" \
+          "        txt = (t or '').strip()" \
+          "        if txt:" \
+          "            parts.append(txt)" \
+          "    return ' '.join(parts)" \
+          "" \
+          "def parse_offer(html):" \
+          "    soup = BeautifulSoup(html, 'lxml')" \
+          "    data = {}" \
           "    ogt = soup.find('meta', {'property': 'og:title'})" \
-          '    title = None' \
-          '    if ogt and ogt.get("content"): title = ogt["content"]' \
-          '    if not title:' \
-          '        h1 = soup.select_one("h1")' \
-          '        if h1: title = h1.get_text(strip=True)' \
-          '    if not title and soup.title and soup.title.string:' \
-          '        title = soup.title.string.strip()' \
+          "    title = None" \
+          "    if ogt and ogt.get('content'): title = ogt['content']" \
+          "    if not title:" \
+          "        h1 = soup.select_one('h1')" \
+          "        if h1: title = h1.get_text(strip=True)" \
+          "    if not title and soup.title and soup.title.string:" \
+          "        title = soup.title.string.strip()" \
           "    data['title_scraped'] = clean_text(title) if title else None" \
-          '' \
-          '    full = extract_text_fields(soup)' \
-          '    m = EMAIL_RE.search(full); email = m.group(0) if m else None' \
+          "" \
+          "    full = extract_text_fields(soup)" \
+          "    m = EMAIL_RE.search(full); email = m.group(0) if m else None" \
           "    data['employer_email_scraped'] = email" \
-          '    m = PHONE_RE.search(full); phone = m.group(0) if m else None' \
+          "    m = PHONE_RE.search(full); phone = m.group(0) if m else None" \
           "    data['phone_scraped'] = phone" \
-          '    m = SALARY_RE.search(full); sal = m.group(0) if m else None' \
+          "    m = SALARY_RE.search(full); sal = m.group(0) if m else None" \
           "    data['salary_text'] = sal" \
-          '    m = CONTRACT_RE.search(full); ctt = m.group(0).title() if m else None' \
+          "    m = CONTRACT_RE.search(full); ctt = m.group(0).title() if m else None" \
           "    data['contract_type'] = ctt" \
-          '    m = DUR_RE.search(full); dur = m.group(0) if m else None' \
+          "    m = DUR_RE.search(full); dur = m.group(0) if m else None" \
           "    data['duration_text'] = dur" \
-          '    m = START_RE.search(full); start = m.group(1) if m else None' \
+          "    m = START_RE.search(full); start = m.group(1) if m else None" \
           "    data['start_text'] = start" \
-          '' \
-          '    comp = None' \
-          '    for sel in [".company",".employer",".recruiter",".job-company",".posting-company","[data-cy=companyName]","[itemprop=name] .org","[itemprop=hiringOrganization] [itemprop=name]"]:' \
-          '        el = soup.select_one(sel)' \
-          '        if el and el.get_text(strip=True): comp = el.get_text(strip=True); break' \
-          '    if not comp:' \
-          '        m = re.search(r"(Entreprise|Société|Employeur)\s*[:\-]\s*([A-Za-zÀ-ÿ0-9&\-\s]{2,})", full, re.I)' \
-          '        if m: comp = m.group(2).strip()' \
+          "" \
+          "    comp = None" \
+          "    for sel in ['.company','.employer','.recruiter','.job-company','.posting-company','[data-cy=companyName]','[itemprop=name] .org','[itemprop=hiringOrganization] [itemprop=name]']:" \
+          "        el = soup.select_one(sel)" \
+          "        if el and el.get_text(strip=True): comp = el.get_text(strip=True); break" \
+          "    if not comp:" \
+          "        m = re.search(r'(Entreprise|Société|Employeur)\\s*[:\\-]\\s*([A-Za-zÀ-ÿ0-9&\\-\\s]{2,})', full, re.I)" \
+          "        if m: comp = m.group(2).strip()" \
           "    data['company_scraped'] = clean_text(comp) if comp else None" \
-          '' \
-          '    loc = None' \
-          '    for sel in [".location","[itemprop=addressLocality]","[data-testid=job-location]"]:' \
-          '        el = soup.select_one(sel)' \
-          '        if el and el.get_text(strip=True): loc = el.get_text(strip=True); break' \
-          '    if not loc:' \
-          '        m = re.search(r"\b(\d{2})\b\s*(?:-\s*)?[A-Za-zÀ-ÿ\-]{2,}", full)' \
-          '        if m: loc = m.group(0)' \
+          "" \
+          "    loc = None" \
+          "    for sel in ['.location','[itemprop=addressLocality]','[data-testid=job-location]']:" \
+          "        el = soup.select_one(sel)" \
+          "        if el and el.get_text(strip=True): loc = el.get_text(strip=True); break" \
+          "    if not loc:" \
+          "        m = re.search(r'\\b(\\d{2})\\b\\s*(?:-\\s*)?[A-Za-zÀ-ÿ\\-]{2,}', full)" \
+          "        if m: loc = m.group(0)" \
           "    data['location_scraped'] = clean_text(loc) if loc else None" \
-          '' \
-          '    housing = None' \
-          '    txt_low = full.lower()' \
-          '    for kw in HOUSING_HINTS:' \
-          '        if kw in txt_low:' \
-          '            housing = kw; break' \
+          "" \
+          "    housing = None" \
+          "    txt_low = full.lower()" \
+          "    for kw in HOUSING_HINTS:" \
+          "        if kw in txt_low:" \
+          "            housing = kw; break" \
           "    data['housing_hint'] = housing" \
-          '' \
-          '    return data' \
-          '' \
-          'def fetch(url):' \
-          '    try:' \
-          '        r = requests.get(url, headers=HEADERS, timeout=20, allow_redirects=True)' \
-          '        if r.status_code == 200 and r.text and len(r.text) > 500:' \
-          '            return r.text' \
-          '    except Exception:' \
-          '        return None' \
-          '    return None' \
-          '' \
-          'def main():' \
+          "" \
+          "    return data" \
+          "" \
+          "def fetch(url):" \
+          "    try:" \
+          "        r = requests.get(url, headers=HEADERS, timeout=20, allow_redirects=True)" \
+          "        if r.status_code == 200 and r.text and len(r.text) > 500:" \
+          "            return r.text" \
+          "    except Exception:" \
+          "        return None" \
+          "    return None" \
+          "" \
+          "def main():" \
           "    base = json.load(open('offers_filtered.json','r',encoding='utf-8'))" \
-          '    items = base.get("offers", []) if isinstance(base, dict) else []' \
-          '    enriched = []' \
-          '    for i, it in enumerate(items[:200], start=1):' \
-          '        link = build_offer_link(it)' \
-          '        out = dict(it)' \
+          "    items = base.get('offers', []) if isinstance(base, dict) else []" \
+          "    enriched = []" \
+          "    import random" \
+          "    for i, it in enumerate(items[:200], start=1):" \
+          "        link = build_offer_link(it)" \
+          "        out = dict(it)" \
           "        out['offer_url'] = link or it.get('offer_url') or it.get('url') or it.get('page_url')" \
-          '        html = fetch(link) if link else None' \
-          '        if html:' \
-          '            parsed = parse_offer(html)' \
-          '            for k, v in parsed.items():' \
-          '                if v and not out.get(k): out[k] = v' \
-          '        enriched.append(out)' \
-          '        time.sleep(random.uniform(0.8,1.6))' \
+          "        html = fetch(link) if link else None" \
+          "        if html:" \
+          "            parsed = parse_offer(html)" \
+          "            for k, v in parsed.items():" \
+          "                if v and not out.get(k): out[k] = v" \
+          "        enriched.append(out)" \
+          "        time.sleep(random.uniform(0.8,1.6))" \
           "    json.dump({'offers':enriched}, open('offers_enriched.json','w',encoding='utf-8'), ensure_ascii=False, indent=2)" \
-          '    print("Enriched:", len(enriched))' \
-          '' \
-          'if __name__ == "__main__":' \
-          '    main()' \
+          "    print('Enriched:', len(enriched))" \
+          "" \
+          "if __name__ == '__main__':" \
+          "    main()" \
           > scrape_details.py
 
       - name: Run scraping (details)
-        run: python scrape_details.py
+        run: |
+          set -euo pipefail
+          python scrape_details.py
 
       # ---- Étape 4: Email enrichi ----
       - name: Write email_report.py
         run: |
+          set -euo pipefail
           printf "%s\n" \
           "import os, smtplib, json" \
           "from email.mime.multipart import MIMEMultipart" \
           "from email.mime.text import MIMEText" \
           "" \
-          "RECIPIENT = os.getenv('RECIPIENT_EMAIL')" \
+          "RECIPIENT = os.getenv('RECIPIENT_EMAIL') or 'indrix.mk@gmail.com, stellameftah@gmail.com'" \
           "SENDER = os.getenv('SENDER_EMAIL')" \
           "SMTP_HOST = os.getenv('SMTP_HOST')" \
           "SMTP_PORT = int(os.getenv('SMTP_PORT'))" \
@@ -371,7 +404,6 @@ jobs:
           "for it in items[:200]:" \
           "    src = pretty_source(it.get('source','?'))" \
           "    title = (it.get('title_scraped') or it.get('title') or 'Offre').strip()" \
-          "    # Supprime un éventuel préfixe 'Source: ' au début du titre (sans regex)" \
           "    tl = title.lower(); sl = src.lower()" \
           "    if tl.startswith(sl):" \
           "        title = title[len(src):].lstrip(' :-–—|')" \
@@ -379,7 +411,7 @@ jobs:
           "    score = str(it.get('score','?'))" \
           "    mail = (it.get('employer_email_scraped') or it.get('employer_email') or '—').strip()" \
           "    link = build_offer_link(it)" \
-          "    url_field = '<a href='{0}'>URL</a>'.format(link) if link else 'URL indisponible'" \
+          "    url_field = '<a href=\"' + link + '\">URL</a>' if link else 'URL indisponible'" \
           "    extras = []" \
           "    if it.get('location_scraped'): extras.append('Lieu: ' + it['location_scraped'])" \
           "    if it.get('contract_type'): extras.append('Contrat: ' + it['contract_type'])" \
@@ -404,7 +436,7 @@ jobs:
           "" \
           "with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as s:" \
           "    s.starttls(); s.login(SMTP_USER, SMTP_PASS)" \
-          "    s.sendmail(SMTP_USER, [x.strip() for x in RECIPIENT.split(',') if x.strip()], msg.as_string())" \
+          "    s.sendmail(SENDER, [x.strip() for x in RECIPIENT.split(',') if x.strip()], msg.as_string())" \
           "print('Email sent to', RECIPIENT)" \
           > email_report.py
 
@@ -416,7 +448,9 @@ jobs:
           SMTP_PORT: ${{ secrets.SMTP_PORT }}
           SMTP_USER: ${{ secrets.SMTP_USER }}
           SMTP_PASS: ${{ secrets.SMTP_PASS }}
-        run: python email_report.py
+        run: |
+          set -euo pipefail
+          python email_report.py
 
       # ---- Étape 5: Artifacts pour debug ----
       - name: Upload artifacts
