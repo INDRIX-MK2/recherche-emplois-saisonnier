@@ -21,7 +21,7 @@ jobs:
       TZ: Europe/Paris
       OPENAI_MODEL: gpt-5
       OPENAI_TEMPERATURE: "1"
-      OPENAI_CHUNK_SIZE: "50"
+      OPENAI_CHUNK_SIZE: "20"
 
     steps:
       - name: Checkout
@@ -111,32 +111,32 @@ jobs:
           '' \
           'MODEL = os.getenv("OPENAI_MODEL","gpt-5")' \
           'TEMP = float(os.getenv("OPENAI_TEMPERATURE","1"))' \
-          'CHUNK_SIZE = int(os.getenv("OPENAI_CHUNK_SIZE","50"))' \
+          'CHUNK_SIZE = int(os.getenv("OPENAI_CHUNK_SIZE","20"))' \
           '' \
-          'client = OpenAI(timeout=120.0, max_retries=2)' \
+          'client = OpenAI(timeout=httpx.Timeout(180.0, connect=30.0, read=180.0, write=180.0), max_retries=2)' \
           '' \
           'offers = json.load(open("offers_raw.json","r",encoding="utf-8"))' \
           'filters = json.load(open("filters.json","r",encoding="utf-8"))' \
           '' \
           'sys_prompt = {' \
-          "  'role':'system'," \
-          "  'content':'Tu filtres des offres. NE SUPPRIME RIEN. Pour chaque offre, ajoute un score (0-100) basé sur: 1) logement (priorité max), 2) lieu (France métropolitaine, sans Corse/DOM-COM), 3) durée (7-92 jours), 4) métier (dans la liste). Réponds en JSON strict {offers:[{title,source,url,offer_id,employer_email,company,score,note}]}. Court et structuré.'" \
+          '  "role":"system",' \
+          '  "content":"Tu filtres des offres. NE SUPPRIME RIEN. Pour chaque offre, ajoute un score (0-100) basé sur: 1) logement (priorité max), 2) lieu (France métropolitaine, sans Corse/DOM-COM), 3) durée (7-92 jours), 4) métier (dans la liste). Réponds en JSON strict {offers:[{title,source,url,offer_id,employer_email,company,score,note}]}. Court et structuré."' \
           '}' \
           '' \
           '@backoff.on_exception(' \
           '  backoff.expo,' \
           '  (APIConnectionError, httpx.RemoteProtocolError, httpx.ConnectError, httpx.ReadTimeout, RateLimitError, APIStatusError, APITimeoutError),' \
-          '  max_tries=6,' \
+          '  max_tries=8,' \
           '  jitter=backoff.full_jitter' \
           ')' \
           'def call_openai(payload):' \
           '  return client.chat.completions.create(' \
           '    model=MODEL,' \
           '    temperature=TEMP,' \
-          "    response_format={'type':'json_object'}," \
+          '    response_format={"type":"json_object"},' \
           '    messages=[' \
           '      sys_prompt,' \
-          "      {'role':'user','content': json.dumps(payload, ensure_ascii=False)}" \
+          '      {"role":"user","content": json.dumps(payload, ensure_ascii=False)}' \
           '    ]' \
           '  )' \
           '' \
@@ -144,23 +144,38 @@ jobs:
           '  for i in range(0, len(lst), n):' \
           '    yield lst[i:i+n]' \
           '' \
+          'def process_part(part, depth=0):' \
+          '  payload = {"filters": filters, "offers": part}' \
+          '  try:' \
+          '    resp = call_openai(payload)' \
+          '    content = resp.choices[0].message.content' \
+          '    data = json.loads(content)' \
+          '    return data.get("offers", [])' \
+          '  except APITimeoutError:' \
+          '    # Si ça time-out, on coupe le lot et on réessaie (2 niveaux max), sinon on fallback' \
+          '    if len(part) > 5 and depth < 2:' \
+          '      mid = len(part)//2' \
+          '      return process_part(part[:mid], depth+1) + process_part(part[mid:], depth+1)' \
+          '    else:' \
+          '      return [{' \
+          '        "title": p.get("title","(timeout)"),' \
+          '        "source": p.get("source","gpt"),' \
+          '        "url": p.get("url","#"),' \
+          '        "note": "Timeout GPT : fallback minimal",' \
+          '        "score": 0' \
+          '      } for p in part]' \
+          '  except Exception:' \
+          '    return [{"title":"(parse error)","source":"gpt","url":"#","note":"Réponse non JSON","score":0}]' \
+          '' \
           'aggregated = []' \
           'for idx, part in enumerate(chunks(offers, CHUNK_SIZE), start=1):' \
-          "  payload = {'filters': filters, 'offers': part}" \
-          '  resp = call_openai(payload)' \
-          '  content = resp.choices[0].message.content' \
-          '  try:' \
-          '    data = json.loads(content)' \
-          '    part_offers = data.get("offers", [])' \
-          '  except Exception:' \
-          "    part_offers = [{'title':'(parse error)','source':'gpt','url':'#','note':'Réponse non JSON','score':0}]" \
+          '  part_offers = process_part(part)' \
           '  aggregated.extend(part_offers)' \
           '  print(f"Chunk {idx}: +{len(part_offers)} items")' \
           '' \
-          "out = {'offers': aggregated}" \
+          'out = {"offers": aggregated}' \
           'json.dump(out, open("offers_filtered.json","w",encoding="utf-8"), ensure_ascii=False, indent=2)' \
-          'print("Done. Total items:", len(aggregated))' \
-          > filter_with_gpt.py
+          'print("Done. Total items:", len(aggregated))'
 
       - name: Run filtering (GPT-5)
         env:
