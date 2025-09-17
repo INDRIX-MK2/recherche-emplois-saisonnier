@@ -54,7 +54,7 @@ jobs:
           set -euo pipefail
           printf '%s\n' \
           '[' \
-          '  "francetravail","indeed","manpower","leboncoin","adzuna","meteojob"' \
+          '  "francetravail","indeed","manpower","leboncoin","adzuna","meteojob","hellowork"' \
           ']' > sites.json
           cat sites.json
 
@@ -177,7 +177,6 @@ jobs:
           "" \
           "# -------- Leboncoin : /ad/...<id>.htm --------" \
           "def crawl_leboncoin(term, max_items=60):" \
-          "    # Catégorie Emploi (10) + texte" \
           "    url = f'https://www.leboncoin.fr/recherche?category=10&text={q(term)}&locations=France'" \
           "    html = get(url)" \
           "    out = []" \
@@ -188,7 +187,6 @@ jobs:
           "    for a in soup.find_all('a', href=True):" \
           "        href = a['href']" \
           "        if href.startswith('/'): href = 'https://www.leboncoin.fr' + href" \
-          "        # format d'annonce: .../ad/...<digits>.htm" \
           "        if '/ad/' in href and href.endswith('.htm'):" \
           "            if href in seen: continue" \
           "            seen.add(href)" \
@@ -237,13 +235,34 @@ jobs:
           "            if len(out) >= max_items: break" \
           "    return out" \
           "" \
+          "# -------- HelloWork : /fr-fr/emplois/<slug>-<id>.html --------" \
+          "def crawl_hellowork(term, max_items=60):" \
+          "    url = f'https://www.hellowork.com/fr-fr/emploi/recherche.html?k={q(term)}&l=France'" \
+          "    html = get(url)" \
+          "    out = []" \
+          "    if not html:" \
+          "        return out" \
+          "    soup = BeautifulSoup(html, 'lxml')" \
+          "    seen = set()" \
+          "    for a in soup.find_all('a', href=True):" \
+          "        href = a['href']" \
+          "        if href.startswith('/'): href = 'https://www.hellowork.com' + href" \
+          "        if '/fr-fr/emplois/' in href and href.endswith('.html'):" \
+          "            if href in seen: continue" \
+          "            seen.add(href)" \
+          "            title = a.get_text(strip=True) or 'Offre HelloWork'" \
+          "            out.append({'source':'hellowork','title':title,'url':href})" \
+          "            if len(out) >= max_items: break" \
+          "    return out" \
+          "" \
           "DISPATCH = {" \
           "    'francetravail': crawl_france_travail," \
-          "    'indeed': crawl_indeed," \
-          "    'manpower': crawl_manpower," \
-          "    'leboncoin': crawl_leboncoin," \
-          "    'adzuna': crawl_adzuna," \
-          "    'meteojob': crawl_meteojob," \
+          "    'indeed':        crawl_indeed," \
+          "    'manpower':      crawl_manpower," \
+          "    'leboncoin':     crawl_leboncoin," \
+          "    'adzuna':        crawl_adzuna," \
+          "    'meteojob':      crawl_meteojob," \
+          "    'hellowork':     crawl_hellowork," \
           "}" \
           "" \
           "raw = []" \
