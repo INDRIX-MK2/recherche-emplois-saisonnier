@@ -20,7 +20,7 @@ jobs:
       TZ: Europe/Paris
       OPENAI_MODEL: gpt-5
       OPENAI_TEMPERATURE: "0"
-      OPENAI_CHUNK_SIZE: "16"
+      OPENAI_CHUNK_SIZE: "24"
 
     steps:
       - name: Checkout
@@ -78,7 +78,7 @@ jobs:
           '}' > filters.json
           cat filters.json
 
-      # ---- Étape 1: liens de recherche (France Travail, Indeed, etc.) ----
+      # ---- Étape 1 : récolte de SEEDS (recherche) ----
       - name: Write fetch_sites.py
         run: |
           set -euo pipefail
@@ -87,9 +87,9 @@ jobs:
           "SITES = json.load(open(\"sites.json\",\"r\",encoding=\"utf-8\"))" \
           "TERMS = os.getenv(\"SEARCH_TERMS\", \"\").strip() or \"${{ github.event.inputs.search_terms }}\"" \
           "def q(s): return requests.utils.quote(s)" \
-          "def results_indeed(t): return [{\"source\":\"indeed\",\"url\":f\"https://fr.indeed.com/jobs?q={q(t)}+log%C3%A9&l=France\",\"title\":\"Indeed search: \"+t}]" \
-          "def results_hellowork(t): return [{\"source\":\"hellowork\",\"url\":f\"https://www.hellowork.com/fr-fr/emploi/recherche.html?k={q(t)}+logement\",\"title\":\"HelloWork : \"+t}]" \
-          "def results_francetravail(t): return [{\"source\":\"francetravail\",\"url\":f\"https://candidat.francetravail.fr/offres/recherche?k={q(t)}&l=France\",\"title\":\"France Travail : \"+t}]" \
+          "def results_indeed(t): return [{\"source\":\"indeed\",\"url\":f\"https://fr.indeed.com/jobs?q={q(t)}+log%C3%A9&l=France\",\"title\":\"Indeed: \"+t}]" \
+          "def results_hellowork(t): return [{\"source\":\"hellowork\",\"url\":f\"https://www.hellowork.com/fr-fr/emploi/recherche.html?k={q(t)}+logement\",\"title\":\"HelloWork: \"+t}]" \
+          "def results_francetravail(t): return [{\"source\":\"francetravail\",\"url\":f\"https://candidat.francetravail.fr/offres/recherche?k={q(t)}&l=France\",\"title\":\"France Travail: \"+t}]" \
           "def results_simple(engine, t): return [{\"source\":engine,\"url\":f\"https://www.google.com/search?q=site%3A{engine}.com+{q(t)}+log%C3%A9+France\",\"title\":engine+\" via Google\"}]" \
           "DISPATCH = {\"indeed\":results_indeed,\"hellowork\":results_hellowork,\"francetravail\":results_francetravail}" \
           "raw=[]" \
@@ -104,158 +104,70 @@ jobs:
           python -m pyflakes fetch_sites.py || true
           python fetch_sites.py
 
-      # ---- Étape 1b: détecter des liens de DÉTAIL et télécharger leur HTML ----
-      - name: Write fetch_html.py
-        run: |
-          set -euo pipefail
-          printf '%s\n' \
-          "import re, json, requests, time, random" \
-          "from urllib.parse import urljoin" \
-          "from bs4 import BeautifulSoup" \
-          "" \
-          "HDR={\"User-Agent\":\"Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0 Safari/537.36\",\"Accept-Language\":\"fr-FR,fr;q=0.9\"}" \
-          "" \
-          "def fetch(url, limit=18):" \
-          "    try:" \
-          "        r=requests.get(url,headers=HDR,timeout=limit,allow_redirects=True)" \
-          "        if r.status_code==200 and r.text:" \
-          "            return r.text" \
-          "    except Exception:" \
-          "        return None" \
-          "    return None" \
-          "" \
-          "def compress_html(html, maxlen=30000):" \
-          "    if not html: return \"\"" \
-          "    html=re.sub(r\"(?is)<script.*?>.*?</script>\",\"\",html)" \
-          "    html=re.sub(r\"(?is)<style.*?>.*?</style>\",\"\",html)" \
-          "    html=re.sub(r\"(?is)<!--.*?-->\",\"\",html)" \
-          "    html=re.sub(r\"\\s+\",\" \",html)" \
-          "    return html[:maxlen]" \
-          "" \
-          "def is_detail_url(u, src):" \
-          "    if not u: return False" \
-          "    s=(src or \"\").lower(); ul=u.lower()" \
-          "    if \"francetravail\" in s or \"francetravail\" in ul:" \
-          "        return \"/offres/recherche/detail/\" in ul" \
-          "    if \"indeed\" in s or \"indeed\" in ul:" \
-          "        return (\"viewjob?\" in ul) or (\"/rc/clk\" in ul)" \
-          "    return any(k in ul for k in [\"/detail\",\"/offre\",\"/offres/\",\"/emploi\",\"/job/\"]) and (\"google.\" not in ul and \"search?\" not in ul)" \
-          "" \
-          "def extract_candidate_links(html, base, src, limit=50):" \
-          "    if not html: return []" \
-          "    soup=BeautifulSoup(html,\"lxml\")" \
-          "    links=[a.get(\"href\") for a in soup.find_all(\"a\", href=True)]" \
-          "    out=[]; seen=set()" \
-          "    for h in links:" \
-          "        url=urljoin(base,h)" \
-          "        if url in seen: continue" \
-          "        if is_detail_url(url, src):" \
-          "            seen.add(url); out.append(url)" \
-          "            if len(out)>=limit: break" \
-          "    return out" \
-          "" \
-          "def hints_from_html(html):" \
-          "    if not html: return (\"\",\"\",\"\")" \
-          "    soup=BeautifulSoup(html,\"lxml\")" \
-          "    title=(soup.title.string.strip() if soup.title and soup.title.string else \"\")" \
-          "    og=soup.find(\"meta\",attrs={\"property\":\"og:title\"})" \
-          "    if og and og.get(\"content\"): title=title or og.get(\"content\",\" \").strip()" \
-          "    text=soup.get_text(separator=\" \", strip=True)" \
-          "    text=re.sub(r\"\\s+\",\" \",text)[:2000]" \
-          "    return (title, text, soup.name or \"\")" \
-          "" \
-          "raw=json.load(open(\"offers_raw.json\",\"r\",encoding=\"utf-8\"))" \
-          "detail_pages=[]; seen_detail=set()" \
-          "" \
-          "for it in raw:" \
-          "    src=it.get(\"source\") or \"\"; page=it.get(\"url\") or \"\"" \
-          "    html=fetch(page)" \
-          "    cand=extract_candidate_links(html or \"\", page, src, limit=40)" \
-          "    for du in cand:" \
-          "        if du in seen_detail: continue" \
-          "        seen_detail.add(du)" \
-          "        dh=fetch(du)" \
-          "        comp=compress_html(dh)" \
-          "        title_hint, text_snippet, _ = hints_from_html(dh or \"\")" \
-          "        detail_pages.append({\"source\":src,\"url\":du,\"html\":comp,\"text\":text_snippet,\"title_hint\":title_hint,\"page_type\":\"detail\"})" \
-          "        time.sleep(random.uniform(0.35,0.8))" \
-          "" \
-          "json.dump(detail_pages, open(\"offers_raw.html.json\",\"w\",encoding=\"utf-8\"), ensure_ascii=False, indent=2)" \
-          "print(\"Detail pages fetched:\", len(detail_pages), \"— with_html:\", sum(1 for x in detail_pages if x.get(\"html\")))" \
-          > fetch_html.py
-          python -m pyflakes fetch_html.py || true
-          python fetch_html.py
-
-      # ---- Étape 2: Extraction/Scoring par GPT (HTML de détail) ----
+      # ---- Étape 2 : mapping/notation par GPT — 1 sortie PAR SEED ----
       - name: Write filter_with_gpt.py
-        env:
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
           set -euo pipefail
           printf '%s\n' \
-          "import json, os" \
+          "import json, os, re" \
           "import backoff, httpx" \
           "from openai import OpenAI" \
           "from openai import APIConnectionError, RateLimitError, APIStatusError, APITimeoutError" \
           "" \
           "MODEL = os.getenv(\"OPENAI_MODEL\",\"gpt-5\")" \
           "TEMP = float(os.getenv(\"OPENAI_TEMPERATURE\",\"0\"))" \
-          "CHUNK_SIZE = int(os.getenv(\"OPENAI_CHUNK_SIZE\",\"16\"))" \
+          "CHUNK_SIZE = int(os.getenv(\"OPENAI_CHUNK_SIZE\",\"24\"))" \
           "" \
-          "client = OpenAI(api_key=os.getenv(\"OPENAI_API_KEY\"), timeout=httpx.Timeout(180.0, connect=30.0, read=180.0, write=180.0), max_retries=2)" \
+          "client = OpenAI(api_key=os.getenv(\"OPENAI_API_KEY\"), timeout=120.0, max_retries=2)" \
           "" \
-          "offers = json.load(open(\"offers_raw.html.json\",\"r\",encoding=\"utf-8\"))" \
+          "offers = json.load(open(\"offers_raw.json\",\"r\",encoding=\"utf-8\"))" \
           "filters = json.load(open(\"filters.json\",\"r\",encoding=\"utf-8\"))" \
           "" \
-          "allowed = ', '.join(filters.get('allowed_jobs', []))" \
-          "rules = (\"Scoring 0-100 = logement prioritaire; lieu=France metropolitaine (sans Corse/DOM-COM); duree 7-92 jours; metier ∈ {\" + allowed + \"}.\")" \
+          "allowed = [a.lower() for a in filters.get(\"allowed_jobs\", [])]" \
           "" \
-          "sys_prompt = {" \
-          "  \"role\":\"system\"," \
-          "  \"content\":(" \
-          "    \"Tu recois des objets {source, url, html, text, title_hint, page_type}.\\n\"" \
-          "    \"Extrait exactement UNE offre par objet (meme si informations partielles).\\n\"" \
-          "    \"Champs: {title, company, offer_url, offer_id, employer_email, source, score, note}.\\n\"" \
-          "    \"Si informations manquent, mets une chaine vide. Ne pas inventer d'adresse email.\\n\"" \
-          "    \"offer_url = url d'entree si rien d'autre.\\n\"" \
-          "    \"Pour France Travail: offer_id = segment apres /offres/recherche/detail/.\\n\"" \
-          "    \"Scoring: \" + rules + \"\\n\"" \
-          "    \"Reponds UNIQUEMENT en JSON strict {offers:[{...}]}.\"" \
-          "  )" \
-          "}" \
+          "sys_prompt = {\"role\":\"system\",\"content\":\"Tu reçois des entrées {source,url,title}. POUR CHAQUE entrée, rends EXACTEMENT 1 objet offre. NE SUPPRIME RIEN. Champs: {source,title,company,offer_url,offer_id,employer_email,score,note}. Règles: 1) offer_url = url d'entrée; 2) company vide si inconnue; 3) pour France Travail, si l'URL contient /offres/recherche/detail/<id> alors offer_id=<id>, sinon vide; 4) email uniquement si présent littéralement (sinon vide); 5) score 0-100: +60 si le titre contient 'logé' ou 'logement', +20 si le titre contient un métier autorisé; clamp 0..100. Réponds en JSON strict {offers:[...]}.\"}" \
           "" \
-          "@backoff.on_exception(" \
-          "  backoff.expo," \
-          "  (APIConnectionError, httpx.RemoteProtocolError, httpx.ConnectError, httpx.ReadTimeout, RateLimitError, APIStatusError, APITimeoutError)," \
-          "  max_tries=8," \
-          "  jitter=backoff.full_jitter" \
-          ")" \
+          "@backoff.on_exception(backoff.expo, (APIConnectionError, httpx.RemoteProtocolError, httpx.ConnectError, httpx.ReadTimeout, RateLimitError, APIStatusError, APITimeoutError), max_tries=6, jitter=backoff.full_jitter)" \
           "def call_openai(payload):" \
-          "  return client.chat.completions.create(" \
-          "    model=MODEL," \
-          "    temperature=TEMP," \
-          "    response_format={\"type\":\"json_object\"}," \
-          "    messages=[" \
-          "      sys_prompt," \
-          "      {\"role\":\"user\",\"content\": json.dumps(payload, ensure_ascii=False)}" \
-          "    ]" \
-          "  )" \
+          "  return client.chat.completions.create(model=MODEL, temperature=TEMP, response_format={\"type\":\"json_object\"}, messages=[sys_prompt,{\"role\":\"user\",\"content\": json.dumps(payload, ensure_ascii=False)}])" \
           "" \
           "def chunks(lst, n):" \
           "  for i in range(0, len(lst), n):" \
           "    yield lst[i:i+n]" \
           "" \
+          "def seed_fallback(seed):" \
+          "  t = (seed.get(\"title\") or \"\").strip()" \
+          "  u = (seed.get(\"url\") or \"\").strip()" \
+          "  s = (seed.get(\"source\") or \"\").strip()" \
+          "  tl = t.lower()" \
+          "  score = 0" \
+          "  if \"logé\" in tl or \"logement\" in tl: score += 60" \
+          "  for a in allowed:" \
+          "    if a in tl: score += 20; break" \
+          "  if score > 100: score = 100" \
+          "  oid = \"\"" \
+          "  if \"francetravail\" in u:" \
+          "    m=re.search(r\"/offres/recherche/detail/([A-Za-z0-9_-]+)\", u)" \
+          "    if m: oid=m.group(1)" \
+          "  return {\"source\":s, \"title\":t, \"company\":\"\", \"offer_url\":u, \"offer_id\":oid, \"employer_email\":\"\", \"score\":score, \"note\":\"fallback\"}" \
+          "" \
           "agg=[]" \
-          "non_empty = sum(1 for it in offers if (it.get('html') or it.get('text')))" \
-          "print('Inputs:', len(offers), 'with content:', non_empty)" \
           "for idx, part in enumerate(chunks(offers, CHUNK_SIZE), start=1):" \
           "  payload={\"filters\":filters, \"offers\":part}" \
+          "  out=[]" \
           "  try:" \
           "    resp=call_openai(payload)" \
           "    data=json.loads(resp.choices[0].message.content)" \
           "    out=data.get(\"offers\",[])" \
           "  except Exception:" \
           "    out=[]" \
+          "  if not out or not isinstance(out,list):" \
+          "    out = [seed_fallback(it) for it in part]" \
+          "  elif len(out) != len(part):" \
+          "    while len(out) < len(part):" \
+          "      out.append(seed_fallback(part[len(out)]))" \
+          "    if len(out) > len(part):" \
+          "      out = out[:len(part)]" \
           "  agg.extend(out)" \
           "  print(f\"Chunk {idx}: +{len(out)} items\")" \
           "" \
@@ -263,7 +175,7 @@ jobs:
           "for it in agg:" \
           "  url=(it.get(\"offer_url\") or it.get(\"url\") or \"\").strip()" \
           "  oid=(it.get(\"offer_id\") or \"\").strip()" \
-          "  key=url or oid or ((it.get(\"source\") or \"\")+\"|\"+(it.get(\"title\") or \"\")+\"|\"+(it.get(\"company\") or \"\"))" \
+          "  key=url or oid or ((it.get(\"source\") or \"\")+\"|\"+(it.get(\"title\") or \"\"))" \
           "  if key and key not in seen:" \
           "    seen.add(key); dedup.append(it)" \
           "" \
@@ -271,9 +183,15 @@ jobs:
           "print(\"Done. Total items:\", len(dedup))" \
           > filter_with_gpt.py
           python -m pyflakes filter_with_gpt.py || true
+
+      - name: Run filtering (GPT)
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          set -euo pipefail
           python filter_with_gpt.py
 
-      # ---- Étape 3: Email (URL cliquable, sans répétition de source) ----
+      # ---- Étape 3 : Email (URL cliquable, pas de répétition source) ----
       - name: Write email_report.py
         run: |
           set -euo pipefail
@@ -290,32 +208,24 @@ jobs:
           "def pretty_source(raw):" \
           "    m={\"francetravail\":\"France Travail\",\"hellowork\":\"HelloWork\",\"indeed\":\"Indeed\",\"meteojob\":\"MeteoJob\",\"adzuna\":\"Adzuna\",\"alljobs\":\"AllJobs\",\"linkedin\":\"LinkedIn\",\"google_jobs\":\"Google Jobs\",\"lesjeudis\":\"Les Jeudis\",\"leboncoin\":\"Le Bon Coin\",\"manpower\":\"Manpower\"}" \
           "    s=(raw or \"\").strip().lower(); return m.get(s, raw or \"?\")" \
-          "def build_link(it):" \
-          "    for k in (\"offer_url\",\"url\",\"page_url\"):" \
-          "        v=(it.get(k) or \"\").strip();" \
-          "        if v: return v" \
-          "    src=(it.get(\"source\") or \"\").strip().lower();" \
-          "    oid=(it.get(\"offer_id\") or \"\").strip()" \
-          "    if src==\"francetravail\" and oid: return \"https://candidat.francetravail.fr/offres/recherche/detail/{0}\".format(oid)" \
-          "    return \"\"" \
           "data = json.load(open(\"offers_filtered.json\",\"r\",encoding=\"utf-8\"))" \
           "items = data.get(\"offers\", []) if isinstance(data, dict) else []" \
-          "html=[\"<h2>Offres saisonnieres - Rapport</h2>\",\"<ol>\"]" \
+          "html=[\"<h2>Offres saisonnières - Rapport</h2>\",\"<ol>\"]" \
           "for it in items[:200]:" \
           "    src=pretty_source(it.get(\"source\",\"?\"))" \
-          "    title=(it.get(\"title_scraped\") or it.get(\"title\") or \"Offre\").strip()" \
+          "    title=(it.get(\"title\") or \"Offre\").strip()" \
           "    tl=title.lower(); sl=src.lower()" \
           "    if tl.startswith(sl): title=title[len(src):].lstrip(\" :-–—|\")" \
-          "    company=(it.get(\"company_scraped\") or it.get(\"company\") or \"—\").strip()" \
+          "    company=(it.get(\"company\") or \"—\").strip()" \
           "    score=str(it.get(\"score\",\"?\"))" \
-          "    mail=(it.get(\"employer_email_scraped\") or it.get(\"employer_email\") or \"—\").strip()" \
-          "    link=build_link(it)" \
+          "    mail=(it.get(\"employer_email\") or \"—\").strip()" \
+          "    link=(it.get(\"offer_url\") or it.get(\"url\") or \"\").strip()" \
           "    url_field = (\"<a href=\"+\"\\\"\"+link+\"\\\"\"+\">URL</a>\") if link else \"URL indisponible\"" \
           "    line = \"{0}: {1} - {2} - Score: {3} - {4} - {5}\"" \
           "    li = \"<li>\" + line.format(src, title, company, score, url_field, mail) + \"</li>\"" \
           "    html.append(li)" \
           "html.append(\"</ol>\")" \
-          "msg=MIMEMultipart(\"alternative\"); msg[\"Subject\"]=\"Veille offres saisonnieres (extraction HTML via GPT)\"; msg[\"From\"]=SENDER; msg[\"To\"]=RECIPIENT" \
+          "msg=MIMEMultipart(\"alternative\"); msg[\"Subject\"]=\"Veille offres saisonnières (agrégées)\"; msg[\"From\"]=SENDER; msg[\"To\"]=RECIPIENT" \
           "msg.attach(MIMEText(\"\\n\".join(html),\"html\",\"utf-8\"))" \
           "with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as s:" \
           "    s.starttls(); s.login(SMTP_USER, SMTP_PASS); s.sendmail(SMTP_USER, [x.strip() for x in RECIPIENT.split(\",\") if x.strip()], msg.as_string())" \
@@ -343,5 +253,4 @@ jobs:
             sites.json
             filters.json
             offers_raw.json
-            offers_raw.html.json
             offers_filtered.json
