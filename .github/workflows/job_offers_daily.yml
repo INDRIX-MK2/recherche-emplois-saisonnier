@@ -63,21 +63,21 @@ jobs:
       - name: Write filters.json
         run: |
           set -euo pipefail
-          printf "%s\n" \
-          "{" \
-          "  'must_have_housing': true," \
-          "  'min_duration_days': 7," \
-          "  'max_duration_days': 92," \
-          "  'allow_only_metropole': true," \
-          "  'exclude_corse': true," \
-          "  'exclude_domcom': true," \
-          "  'allowed_jobs': [" \
-          "    'serveur','serveuse','runner','aide de salle','aide barman','commis de bar'," \
-          "    'vendangeur','porteuse','porteur','trieur','ouvrier agricole polyvalent'," \
-          "    'ouvrier de cave','aide caviste','employe polyvalent','employé polyvalent'," \
-          "    'cueilleur','cueilleuse'" \
-          "  ]" \
-          "}" > filters.json
+          printf '%s\n' \
+          '{' \
+          '  "must_have_housing": true,' \
+          '  "min_duration_days": 7,' \
+          '  "max_duration_days": 92,' \
+          '  "allow_only_metropole": true,' \
+          '  "exclude_corse": true,' \
+          '  "exclude_domcom": true,' \
+          '  "allowed_jobs": [' \
+          '    "serveur","serveuse","runner","aide de salle","aide barman","commis de bar",' \
+          '    "vendangeur","porteuse","porteur","trieur","ouvrier agricole polyvalent",' \
+          '    "ouvrier de cave","aide caviste","employe polyvalent","employé polyvalent",' \
+          '    "cueilleur","cueilleuse"' \
+          '  ]' \
+          '}' > filters.json
           cat filters.json
 
       # ---- Étape 1: Collecte des liens de recherche ----
