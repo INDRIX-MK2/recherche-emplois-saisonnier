@@ -19,7 +19,7 @@ jobs:
     env:
       TZ: Europe/Paris
       OPENAI_MODEL: gpt-5
-      OPENAI_TEMPERATURE: "1"   # préférence stable de l'utilisateur
+      OPENAI_TEMPERATURE: "1"
       OPENAI_CHUNK_SIZE: "24"
 
     steps:
@@ -52,10 +52,9 @@ jobs:
       - name: Write sites.json
         run: |
           set -euo pipefail
-          # On se limite aux sources où l'on peut obtenir des liens d'annonce directs et stables
           printf '%s\n' \
           '[' \
-          '  "francetravail","hellowork"' \
+          '  "francetravail","indeed","manpower","leboncoin","adzuna","meteojob"' \
           ']' > sites.json
           cat sites.json
 
@@ -113,8 +112,8 @@ jobs:
           "        time.sleep(1.0 + 0.6*random.random())" \
           "    return ''" \
           "" \
-          "# -------- France Travail : on extrait les /offres/recherche/detail/<ID> --------" \
-          "def crawl_france_travail(term, max_items=40):" \
+          "# -------- France Travail : /offres/recherche/detail/<ID> --------" \
+          "def crawl_france_travail(term, max_items=60):" \
           "    url = f'https://candidat.francetravail.fr/offres/recherche?k={q(term)}&l=France'" \
           "    html = get(url)" \
           "    out = []" \
@@ -125,7 +124,6 @@ jobs:
           "    for a in soup.find_all('a', href=True):" \
           "        href = a['href']" \
           "        if '/offres/recherche/detail/' in href:" \
-          "            # normalise href absolu" \
           "            if href.startswith('/'): href = 'https://candidat.francetravail.fr' + href" \
           "            m = re.search(r'/offres/recherche/detail/([A-Za-z0-9_-]+)', href)" \
           "            if not m: continue" \
@@ -137,9 +135,9 @@ jobs:
           "            if len(out) >= max_items: break" \
           "    return out" \
           "" \
-          "# -------- HelloWork : on extrait les /fr-fr/emplois/<slug>-<id>.html --------" \
-          "def crawl_hellowork(term, max_items=40):" \
-          "    url = f'https://www.hellowork.com/fr-fr/emploi/recherche.html?k={q(term)}&l=France'" \
+          "# -------- Indeed FR : /viewjob?jk=... ou /voir-emploi?jk=... --------" \
+          "def crawl_indeed(term, max_items=60):" \
+          "    url = f'https://fr.indeed.com/jobs?q={q(term)}+log%C3%A9&l=France'" \
           "    html = get(url)" \
           "    out = []" \
           "    if not html:" \
@@ -148,19 +146,104 @@ jobs:
           "    seen = set()" \
           "    for a in soup.find_all('a', href=True):" \
           "        href = a['href']" \
-          "        if href.startswith('/'): href = 'https://www.hellowork.com' + href" \
-          "        # urls attendues: .../fr-fr/emplois/<slug>-<id>.html" \
-          "        if '/fr-fr/emplois/' in href and href.endswith('.html'):" \
+          "        if href.startswith('/'): href = 'https://fr.indeed.com' + href" \
+          "        if ('/viewjob?' in href or '/voir-emploi?' in href) and 'jk=' in href:" \
           "            if href in seen: continue" \
           "            seen.add(href)" \
-          "            title = a.get_text(strip=True) or 'Offre HelloWork'" \
-          "            out.append({'source':'hellowork','title':title,'url':href})" \
+          "            title = a.get_text(strip=True) or 'Offre Indeed'" \
+          "            out.append({'source':'indeed','title':title,'url':href})" \
+          "            if len(out) >= max_items: break" \
+          "    return out" \
+          "" \
+          "# -------- Manpower FR : /offres-emploi/... (page détail) --------" \
+          "def crawl_manpower(term, max_items=60):" \
+          "    url = f'https://www.manpower.fr/recherche-emploi?motsCles={q(term)}&lieu=France'" \
+          "    html = get(url)" \
+          "    out = []" \
+          "    if not html:" \
+          "        return out" \
+          "    soup = BeautifulSoup(html, 'lxml')" \
+          "    seen = set()" \
+          "    for a in soup.find_all('a', href=True):" \
+          "        href = a['href']" \
+          "        if href.startswith('/'): href = 'https://www.manpower.fr' + href" \
+          "        if '/offres-emploi/' in href:" \
+          "            if href in seen: continue" \
+          "            seen.add(href)" \
+          "            title = a.get_text(strip=True) or 'Offre Manpower'" \
+          "            out.append({'source':'manpower','title':title,'url':href})" \
+          "            if len(out) >= max_items: break" \
+          "    return out" \
+          "" \
+          "# -------- Leboncoin : /ad/...<id>.htm --------" \
+          "def crawl_leboncoin(term, max_items=60):" \
+          "    # Catégorie Emploi (10) + texte" \
+          "    url = f'https://www.leboncoin.fr/recherche?category=10&text={q(term)}&locations=France'" \
+          "    html = get(url)" \
+          "    out = []" \
+          "    if not html:" \
+          "        return out" \
+          "    soup = BeautifulSoup(html, 'lxml')" \
+          "    seen = set()" \
+          "    for a in soup.find_all('a', href=True):" \
+          "        href = a['href']" \
+          "        if href.startswith('/'): href = 'https://www.leboncoin.fr' + href" \
+          "        # format d'annonce: .../ad/...<digits>.htm" \
+          "        if '/ad/' in href and href.endswith('.htm'):" \
+          "            if href in seen: continue" \
+          "            seen.add(href)" \
+          "            title = a.get_text(strip=True) or 'Offre Leboncoin'" \
+          "            out.append({'source':'leboncoin','title':title,'url':href})" \
+          "            if len(out) >= max_items: break" \
+          "    return out" \
+          "" \
+          "# -------- Adzuna FR : /details/<id> --------" \
+          "def crawl_adzuna(term, max_items=60):" \
+          "    url = f'https://www.adzuna.fr/search?what={q(term)}&where=France'" \
+          "    html = get(url)" \
+          "    out = []" \
+          "    if not html:" \
+          "        return out" \
+          "    soup = BeautifulSoup(html, 'lxml')" \
+          "    seen = set()" \
+          "    for a in soup.find_all('a', href=True):" \
+          "        href = a['href']" \
+          "        if href.startswith('/'): href = 'https://www.adzuna.fr' + href" \
+          "        if '/details/' in href:" \
+          "            if href in seen: continue" \
+          "            seen.add(href)" \
+          "            title = a.get_text(strip=True) or 'Offre Adzuna'" \
+          "            out.append({'source':'adzuna','title':title,'url':href})" \
+          "            if len(out) >= max_items: break" \
+          "    return out" \
+          "" \
+          "# -------- MeteoJob : /job/<slug>-<id>.html --------" \
+          "def crawl_meteojob(term, max_items=60):" \
+          "    url = f'https://www.meteojob.com/emploi?q={q(term)}&l=France'" \
+          "    html = get(url)" \
+          "    out = []" \
+          "    if not html:" \
+          "        return out" \
+          "    soup = BeautifulSoup(html, 'lxml')" \
+          "    seen = set()" \
+          "    for a in soup.find_all('a', href=True):" \
+          "        href = a['href']" \
+          "        if href.startswith('/'): href = 'https://www.meteojob.com' + href" \
+          "        if '/job/' in href and href.endswith('.html'):" \
+          "            if href in seen: continue" \
+          "            seen.add(href)" \
+          "            title = a.get_text(strip=True) or 'Offre MeteoJob'" \
+          "            out.append({'source':'meteojob','title':title,'url':href})" \
           "            if len(out) >= max_items: break" \
           "    return out" \
           "" \
           "DISPATCH = {" \
           "    'francetravail': crawl_france_travail," \
-          "    'hellowork': crawl_hellowork," \
+          "    'indeed': crawl_indeed," \
+          "    'manpower': crawl_manpower," \
+          "    'leboncoin': crawl_leboncoin," \
+          "    'adzuna': crawl_adzuna," \
+          "    'meteojob': crawl_meteojob," \
           "}" \
           "" \
           "raw = []" \
@@ -169,13 +252,13 @@ jobs:
           "    if not fn: continue" \
           "    for t in terms:" \
           "        items = fn(t)" \
-          "        # boost : garde seulement les titres qui semblent pertinents \"logé\", \"logement\"" \
+          "        # Filtre amont : prioriser les titres qui évoquent 'logé'/'logement'" \
           "        filt = []" \
           "        for it in items:" \
           "            tl = (it.get('title') or '').lower()" \
-          "            if 'logé' in tl or 'logement' in tl or 'logee' in tl or 'loge' in tl:" \
+          "            if 'logé' in tl or 'logement' in tl or 'loge' in tl or 'logee' in tl:" \
           "                filt.append(it)" \
-          "        raw.extend(filt or items[:10])" \
+          "        raw.extend(filt or items[:15])" \
           "" \
           "# dédup par URL" \
           "seen = set(); dedup = []" \
@@ -216,7 +299,7 @@ jobs:
           "  'NE SUPPRIME RIEN. Champs: {source,title,company,offer_url,offer_id,employer_email,score,note}. '" \
           "  'Règles: 1) offer_url = url d\\'entrée (ne jamais changer); 2) company vide si inconnue; '" \
           "  '3) si offer_url contient /offres/recherche/detail/<id> alors offer_id=<id>, sinon vide; '" \
-          "  '4) employer_email uniquement si présent littéralement dans le texte fourni (sinon vide); '" \
+          "  '4) employer_email uniquement si présent littéralement; '" \
           "  '5) score 0-100: +60 si le titre contient logé/logement, +20 si le titre contient un métier autorisé; clamp 0..100. '" \
           "  'Réponds en JSON strict {offers:[...]}. '" \
           "}" \
