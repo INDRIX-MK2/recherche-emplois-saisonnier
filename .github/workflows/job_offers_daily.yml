@@ -188,6 +188,8 @@ jobs:
 
       # ---- Étape 2: Extraction/Scoring par GPT (HTML de détail) ----
       - name: Write filter_with_gpt.py
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
           set -euo pipefail
           printf '%s\n' \
@@ -200,7 +202,7 @@ jobs:
           "TEMP = float(os.getenv(\"OPENAI_TEMPERATURE\",\"0\"))" \
           "CHUNK_SIZE = int(os.getenv(\"OPENAI_CHUNK_SIZE\",\"16\"))" \
           "" \
-          "client = OpenAI(timeout=httpx.Timeout(180.0, connect=30.0, read=180.0, write=180.0), max_retries=2)" \
+          "client = OpenAI(api_key=os.getenv(\"OPENAI_API_KEY\"), timeout=httpx.Timeout(180.0, connect=30.0, read=180.0, write=180.0), max_retries=2)" \
           "" \
           "offers = json.load(open(\"offers_raw.html.json\",\"r\",encoding=\"utf-8\"))" \
           "filters = json.load(open(\"filters.json\",\"r\",encoding=\"utf-8\"))" \
