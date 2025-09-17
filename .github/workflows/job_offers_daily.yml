@@ -78,12 +78,12 @@ jobs:
           '}' > filters.json
           cat filters.json
 
-      # ---- Étape 1 : récolte (avec fallback anti-bot r.jina.ai) ----
+      # ---- Étape 1 : récolte (durcie FT/Indeed/Manpower + fallbacks) ----
       - name: Write fetch_sites.py
         run: |
           set -euo pipefail
           printf '%s\n' \
-          "import json, os, re, time, random, requests" \
+          "import json, os, re, time, random, html, requests" \
           "from bs4 import BeautifulSoup" \
           "" \
           "SITES = json.load(open('sites.json','r',encoding='utf-8'))" \
@@ -92,10 +92,16 @@ jobs:
           "if not terms:" \
           "    terms = ['serveur logé','aide barman logé','runner logé','vendanges logé','ouvrier cave logé','aide caviste logé','employé polyvalent logé','cueilleur logé']" \
           "" \
-          "HEADERS = {" \
-          "  'User-Agent':'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36'," \
-          "  'Accept':'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'," \
-          "  'Accept-Language':'fr-FR,fr;q=0.9,en;q=0.8'," \
+          "UA_POOL = [" \
+          " 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36'," \
+          " 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0 Safari/537.36'," \
+          " 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Safari/605.1.15'," \
+          "]" \
+          "" \
+          "def HEADERS(): return {" \
+          "  'User-Agent': random.choice(UA_POOL)," \
+          "  'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'," \
+          "  'Accept-Language': 'fr-FR,fr;q=0.9,en;q=0.8'," \
           "}" \
           "" \
           "def q(s):" \
@@ -105,173 +111,238 @@ jobs:
           "    except Exception:" \
           "        return s" \
           "" \
-          "def fetch_text(url, timeout=20, tries=3):" \
-          "    # 1/ direct ; 2/ via r.jina.ai/https:// ; 3/ via r.jina.ai/http://" \
-          "    backoffs = [0.6, 0.9, 1.2]" \
-          "    for i in range(tries):" \
+          "def fetch_direct(url, timeout=20):" \
+          "    try:" \
+          "        r = requests.get(url, headers=HEADERS(), timeout=timeout, allow_redirects=True)" \
+          "        if r.status_code == 200 and r.text and len(r.text) > 2000:" \
+          "            return r.text" \
+          "    except Exception:" \
+          "        pass" \
+          "    return ''" \
+          "" \
+          "def fetch_via_jina(url, timeout=20):" \
+          "    for base in ('https://r.jina.ai/https://','https://r.jina.ai/http://'):" \
           "        try:" \
-          "            r = requests.get(url, headers=HEADERS, timeout=timeout, allow_redirects=True)" \
-          "            if r.status_code == 200 and r.text and len(r.text) > 5000:" \
+          "            prox = base + url.split('://',1)[-1]" \
+          "            r = requests.get(prox, headers={'User-Agent': random.choice(UA_POOL)}, timeout=timeout)" \
+          "            if r.status_code == 200 and r.text and len(r.text) > 1500:" \
           "                return r.text" \
           "        except Exception:" \
-          "            pass" \
-          "        time.sleep(backoffs[min(i, len(backoffs)-1)])" \
-          "        # try proxy renders" \
-          "        for base in ('https://r.jina.ai/https://','https://r.jina.ai/http://'):" \
+          "            continue" \
+          "    return ''" \
+          "" \
+          "def fetch_ddg_site(domain: str, query: str, max_hits=120, timeout=25):" \
+          "    qfull = f\"site:{domain} {query}\"" \
+          "    ddg_url = f'https://duckduckgo.com/html/?q={q(qfull)}&kl=fr-fr&kp=-2'" \
+          "    txt = fetch_via_jina(ddg_url, timeout=timeout) or fetch_direct(ddg_url, timeout=timeout)" \
+          "    if not txt: return []" \
+          "    hits = []" \
+          "    soup = BeautifulSoup(txt, 'lxml')" \
+          "    for a in soup.find_all('a', href=True):" \
+          "        href = a['href']" \
+          "        if domain in href and 'javascript:' not in href and 'duckduckgo.com' not in href:" \
+          "            hits.append(html.unescape(href))" \
+          "            if len(hits) >= max_hits: break" \
+          "    cleaned = []" \
+          "    for h in hits:" \
+          "        m = re.search(r'[?&]uddg=([^&]+)', h)" \
+          "        if m:" \
           "            try:" \
-          "                prox = base + url.split('://',1)[-1]" \
-          "                r = requests.get(prox, headers={'User-Agent':HEADERS['User-Agent']}, timeout=timeout)" \
-          "                if r.status_code == 200 and r.text and len(r.text) > 2000:" \
-          "                    return r.text" \
-          "            except Exception:" \
+          "                from urllib.parse import unquote" \
+          "                cleaned.append(unquote(m.group(1)))" \
           "                continue" \
+          "            except Exception:" \
+          "                pass" \
+          "        cleaned.append(h)" \
+          "    return cleaned" \
+          "" \
+          "def fetch_text(url, tries=3):" \
+          "    for i in range(tries):" \
+          "        t = fetch_direct(url)" \
+          "        if t: return t" \
+          "        t = fetch_via_jina(url)" \
+          "        if t: return t" \
+          "        time.sleep(0.4 + 0.4*random.random())" \
           "    return ''" \
           "" \
           "def keep_if_housing(title: str) -> bool:" \
           "    t = (title or '').lower()" \
           "    return ('logé' in t) or ('logement' in t) or ('loge' in t) or ('logee' in t)" \
           "" \
-          "def add_items(out, items, max_keep=30):" \
+          "def add_items(out, items, max_keep=40):" \
           "    filt = [it for it in items if keep_if_housing(it.get('title'))]" \
-          "    if filt:" \
-          "        out.extend(filt)" \
-          "    else:" \
-          "        out.extend(items[:max_keep])" \
+          "    if filt: out.extend(filt)" \
+          "    else:    out.extend(items[:max_keep])" \
           "" \
-          "# -------- France Travail --------" \
-          "def crawl_france_travail(term, max_items=120):" \
-          "    url = f'https://candidat.francetravail.fr/offres/recherche?k={q(term)}&l=France'" \
-          "    html = fetch_text(url)" \
-          "    out = []" \
-          "    if not html:" \
-          "        return out" \
-          "    seen=set()" \
-          "    for m in re.finditer(r'/offres/recherche/detail/([A-Za-z0-9_-]{6,})', html):" \
+          "# ======================= FRANCE TRAVAIL =======================" \
+          "FT_DETAIL_RX = re.compile(r'/offres/recherche/detail/([A-Za-z0-9_-]{6,})')" \
+          "" \
+          "def ft_extract_from_html(html_text, max_items=200):" \
+          "    out, seen = [], set()" \
+          "    for m in FT_DETAIL_RX.finditer(html_text):" \
           "        oid = m.group(1)" \
           "        href = f'https://candidat.francetravail.fr/offres/recherche/detail/{oid}'" \
           "        if href in seen: continue" \
           "        seen.add(href)" \
           "        out.append({'source':'francetravail','title':f'Offre {oid}','url':href,'offer_id':oid})" \
           "        if len(out) >= max_items: break" \
-          "    # essayer de remplacer les titres par du texte lisible si présent" \
           "    try:" \
-          "        soup = BeautifulSoup(html, 'lxml')" \
+          "        soup = BeautifulSoup(html_text, 'lxml')" \
           "        for a in soup.find_all('a', href=True):" \
           "            href = a['href']" \
           "            if href.startswith('/'): href = 'https://candidat.francetravail.fr' + href" \
-          "            m = re.search(r'/offres/recherche/detail/([A-Za-z0-9_-]{6,})', href)" \
+          "            m = FT_DETAIL_RX.search(href)" \
           "            if not m: continue" \
           "            oid = m.group(1)" \
           "            t = a.get_text(strip=True)" \
           "            if not t: continue" \
           "            for it in out:" \
-          "                if it['offer_id']==oid: it['title']=t" \
+          "                if it['offer_id'] == oid: it['title'] = t" \
           "    except Exception:" \
           "        pass" \
           "    return out" \
           "" \
-          "# -------- Indeed --------" \
-          "def crawl_indeed(term, max_items=120):" \
-          "    url = f'https://fr.indeed.com/jobs?q={q(term)}&l=France'" \
-          "    html = fetch_text(url)" \
-          "    out=[]" \
-          "    if not html:" \
-          "        return out" \
-          "    seen=set()" \
-          "    # data-jk + icid variations" \
-          "    for m in re.finditer(r'data-jk\\s*=\\s*[\\\"\\']([A-Za-z0-9]+)[\\\"\\']', html):" \
+          "def crawl_france_travail(term, max_items=200):" \
+          "    urls = [" \
+          "      f'https://candidat.francetravail.fr/offres/recherche?k={q(term)}&l=France'," \
+          "      f'https://candidat.francetravail.fr/offres/recherche?k={q(term+\" logé\")}&l=France'," \
+          "      f'https://candidat.francetravail.fr/offres/recherche?k={q(term+\" logement\")}&l=France'," \
+          "    ]" \
+          "    out = []" \
+          "    for u in urls:" \
+          "        txt = fetch_text(u)" \
+          "        if not txt: continue" \
+          "        out.extend(ft_extract_from_html(txt, max_items=max_items-len(out)))" \
+          "        if len(out) >= max_items: break" \
+          "    if len(out) < max_items:" \
+          "        ddg_hits = []" \
+          "        for kw in (term, term+' logé', term+' logement'):" \
+          "            ddg_hits += fetch_ddg_site('candidat.francetravail.fr', kw, max_hits=max_items)" \
+          "        seen_urls = {it['url'] for it in out}" \
+          "        for h in ddg_hits:" \
+          "            m = FT_DETAIL_RX.search(h)" \
+          "            if m:" \
+          "                oid = m.group(1)" \
+          "                href = f'https://candidat.francetravail.fr/offres/recherche/detail/{oid}'" \
+          "                if href in seen_urls: continue" \
+          "                seen_urls.add(href)" \
+          "                out.append({'source':'francetravail','title':f'Offre {oid}','url':href,'offer_id':oid})" \
+          "                if len(out) >= max_items: break" \
+          "    seen, ded = set(), []" \
+          "    for it in out:" \
+          "        u = it.get('url','')" \
+          "        if u and u not in seen:" \
+          "            seen.add(u); ded.append(it)" \
+          "    return ded[:max_items]" \
+          "" \
+          "# ======================= INDEED =======================" \
+          "JK_RX = re.compile(r'(?:data-jk|jk)\\s*=\\s*[\\\"\\']([A-Za-z0-9]+)[\\\"\\']')" \
+          "VIEWJOB_RX = re.compile(r'/viewjob\\?[^\\\"#]*\\bjk=([A-Za-z0-9]+)')" \
+          "VOIR_RX = re.compile(r'/voir-emploi\\?[^\\\"#]*\\bjk=([A-Za-z0-9]+)')" \
+          "" \
+          "def indeed_extract_from_html(html_text, max_items=250):" \
+          "    out, seen = [], set()" \
+          "    for m in JK_RX.finditer(html_text):" \
           "        jk = m.group(1)" \
           "        href = f'https://fr.indeed.com/viewjob?jk={jk}'" \
           "        if href in seen: continue" \
           "        seen.add(href)" \
           "        out.append({'source':'indeed','title':'Offre Indeed','url':href})" \
-          "        if len(out) >= max_items: break" \
-          "    # bonus: certains liens SSR /viewjob?jk=... déjà présents" \
-          "    for m in re.finditer(r'href=\\\"(/viewjob\\?[^\\\"#]*jk=[A-Za-z0-9]+[^\\\"]*)\\\"', html):" \
-          "        path=m.group(1)" \
-          "        href='https://fr.indeed.com'+path" \
+          "        if len(out) >= max_items: return out" \
+          "    for m in VIEWJOB_RX.finditer(html_text):" \
+          "        jk = m.group(1)" \
+          "        href = f'https://fr.indeed.com/viewjob?jk={jk}'" \
           "        if href in seen: continue" \
           "        seen.add(href)" \
           "        out.append({'source':'indeed','title':'Offre Indeed','url':href})" \
-          "        if len(out) >= max_items: break" \
+          "        if len(out) >= max_items: return out" \
+          "    for m in VOIR_RX.finditer(html_text):" \
+          "        jk = m.group(1)" \
+          "        href = f'https://fr.indeed.com/viewjob?jk={jk}'" \
+          "        if href in seen: continue" \
+          "        seen.add(href)" \
+          "        out.append({'source':'indeed','title':'Offre Indeed','url':href})" \
+          "        if len(out) >= max_items: return out" \
           "    return out" \
           "" \
-          "# -------- Manpower --------" \
-          "def crawl_manpower(term, max_items=120):" \
-          "    url = f'https://www.manpower.fr/recherche-emploi?motsCles={q(term)}&lieu=France'" \
-          "    html = fetch_text(url)" \
-          "    out=[]" \
-          "    if not html:" \
-          "        return out" \
-          "    seen=set()" \
-          "    for m in re.finditer(r'href=\\\"(/offres-emploi/[^\\\"#?]+)\\\"', html):" \
-          "        path = m.group(1)" \
-          "        href = 'https://www.manpower.fr'+path" \
+          "def crawl_indeed(term, max_items=250):" \
+          "    out = []" \
+          "    for qterm in (term, term+' logé', term+' logement'):" \
+          "        url = f'https://fr.indeed.com/jobs?q={q(qterm)}&l=France'" \
+          "        txt = fetch_text(url)" \
+          "        if not txt: continue" \
+          "        out += indeed_extract_from_html(txt, max_items=max_items-len(out))" \
+          "        if len(out) >= max_items: break" \
+          "    if len(out) < max_items:" \
+          "        ddg_hits = []" \
+          "        for kw in (term, term+' logé', term+' logement'):" \
+          "            ddg_hits += fetch_ddg_site('fr.indeed.com', kw+' viewjob', max_hits=max_items)" \
+          "        seen = {it['url'] for it in out}" \
+          "        for h in ddg_hits:" \
+          "            m = VIEWJOB_RX.search(h) or VOIR_RX.search(h) or JK_RX.search(h)" \
+          "            if m:" \
+          "                jk = m.group(1) if m.lastindex else m.group(0)" \
+          "                href = f'https://fr.indeed.com/viewjob?jk={jk}'" \
+          "                if href in seen: continue" \
+          "                seen.add(href)" \
+          "                out.append({'source':'indeed','title':'Offre Indeed','url':href})" \
+          "                if len(out) >= max_items: break" \
+          "    seen, ded = set(), []" \
+          "    for it in out:" \
+          "        u=it.get('url','')" \
+          "        if u and u not in seen:" \
+          "            seen.add(u); ded.append(it)" \
+          "    return ded[:max_items]" \
+          "" \
+          "# ======================= MANPOWER =======================" \
+          "MP_RX = re.compile(r'/offres-emploi/[^\\\"#?\\s]+')" \
+          "" \
+          "def manpower_extract_from_html(html_text, max_items=250):" \
+          "    out, seen = [], set()" \
+          "    for m in MP_RX.finditer(html_text):" \
+          "        path = m.group(0)" \
+          "        href = 'https://www.manpower.fr' + path" \
           "        if href in seen: continue" \
           "        seen.add(href)" \
           "        out.append({'source':'manpower','title':'Offre Manpower','url':href})" \
           "        if len(out) >= max_items: break" \
           "    return out" \
           "" \
-          "# -------- Leboncoin (souvent vide en CI) --------" \
-          "def crawl_leboncoin(term, max_items=60):" \
-          "    url = f'https://www.leboncoin.fr/recherche?category=10&text={q(term)}&locations=France'" \
-          "    html = fetch_text(url)" \
-          "    out=[]" \
-          "    if not html:" \
-          "        return out" \
-          "    seen=set()" \
-          "    for m in re.finditer(r'href=\\\"(/ad/[^\\\"#]+\\.htm)\\\"', html):" \
-          "        path=m.group(1)" \
-          "        href='https://www.leboncoin.fr'+path" \
-          "        if href in seen: continue" \
-          "        seen.add(href)" \
-          "        out.append({'source':'leboncoin','title':'Offre Leboncoin','url':href})" \
+          "def crawl_manpower(term, max_items=250):" \
+          "    out = []" \
+          "    for qterm in (term, term+' logé', term+' logement'):" \
+          "        url = f'https://www.manpower.fr/recherche-emploi?motsCles={q(qterm)}&lieu=France'" \
+          "        txt = fetch_text(url)" \
+          "        if not txt: continue" \
+          "        out += manpower_extract_from_html(txt, max_items=max_items-len(out))" \
           "        if len(out) >= max_items: break" \
-          "    return out" \
+          "    if len(out) < max_items:" \
+          "        ddg_hits = []" \
+          "        for kw in (term, term+' logé', term+' logement'):" \
+          "            ddg_hits += fetch_ddg_site('www.manpower.fr', kw + ' offres-emploi', max_hits=max_items)" \
+          "        seen = {it['url'] for it in out}" \
+          "        for h in ddg_hits:" \
+          "            m = MP_RX.search(h)" \
+          "            if m:" \
+          "                href = 'https://www.manpower.fr' + m.group(0)" \
+          "                if href in seen: continue" \
+          "                seen.add(href)" \
+          "                out.append({'source':'manpower','title':'Offre Manpower','url':href})" \
+          "                if len(out) >= max_items: break" \
+          "    seen, ded = set(), []" \
+          "    for it in out:" \
+          "        u=it.get('url','')" \
+          "        if u and u not in seen:" \
+          "            seen.add(u); ded.append(it)" \
+          "    return ded[:max_items]" \
           "" \
-          "# -------- Adzuna --------" \
-          "def crawl_adzuna(term, max_items=120):" \
-          "    url = f'https://www.adzuna.fr/search?what={q(term)}&where=France'" \
-          "    html = fetch_text(url)" \
-          "    out=[]" \
-          "    if not html:" \
-          "        return out" \
-          "    seen=set()" \
-          "    for m in re.finditer(r'href=\\\"(/details/[^\\\"#?]+)\\\"', html):" \
-          "        path=m.group(1)" \
-          "        href='https://www.adzuna.fr'+path" \
-          "        if href in seen: continue" \
-          "        seen.add(href)" \
-          "        out.append({'source':'adzuna','title':'Offre Adzuna','url':href})" \
-          "        if len(out) >= max_items: break" \
-          "    return out" \
-          "" \
-          "# -------- MeteoJob --------" \
-          "def crawl_meteojob(term, max_items=120):" \
-          "    url = f'https://www.meteojob.com/emploi?q={q(term)}&l=France'" \
-          "    html = fetch_text(url)" \
-          "    out=[]" \
-          "    if not html:" \
-          "        return out" \
-          "    seen=set()" \
-          "    for m in re.finditer(r'href=\\\"(/job/[^\\\"#?]+\\.html)\\\"', html):" \
-          "        path=m.group(1)" \
-          "        href='https://www.meteojob.com'+path" \
-          "        if href in seen: continue" \
-          "        seen.add(href)" \
-          "        out.append({'source':'meteojob','title':'Offre MeteoJob','url':href})" \
-          "        if len(out) >= max_items: break" \
-          "    return out" \
-          "" \
-          "# -------- HelloWork (SSR OK) --------" \
+          "# ======================= HelloWork (référence) =======================" \
           "def crawl_hellowork(term, max_items=120):" \
           "    url = f'https://www.hellowork.com/fr-fr/emploi/recherche.html?k={q(term)}&l=France'" \
-          "    html = fetch_text(url)" \
+          "    txt = fetch_text(url)" \
           "    out=[]" \
-          "    if not html:" \
-          "        return out" \
-          "    soup=BeautifulSoup(html,'lxml')" \
+          "    if not txt: return out" \
+          "    soup=BeautifulSoup(txt,'lxml')" \
           "    seen=set()" \
           "    for a in soup.find_all('a', href=True):" \
           "        href=a['href']" \
@@ -288,21 +359,18 @@ jobs:
           "  'francetravail': crawl_france_travail," \
           "  'indeed':        crawl_indeed," \
           "  'manpower':      crawl_manpower," \
-          "  'leboncoin':     crawl_leboncoin," \
-          "  'adzuna':        crawl_adzuna," \
-          "  'meteojob':      crawl_meteojob," \
           "  'hellowork':     crawl_hellowork," \
           "}" \
           "" \
           "raw=[]" \
           "per_source={k:0 for k in SITES}" \
           "for site in SITES:" \
-          "    fn=DISPATCH.get(site)" \
-          "    if not fn: continue" \
+          "    if site not in DISPATCH: continue" \
+          "    fn=DISPATCH[site]" \
           "    for t in terms:" \
-          "        items=fn(t)" \
-          "        add_items(raw, items, max_keep=30)" \
-          "        per_source[site]+=len(items)" \
+          "        items = fn(t)" \
+          "        add_items(raw, items, max_keep=40)" \
+          "        per_source[site] += len(items)" \
           "" \
           "seen=set(); dedup=[]" \
           "for it in raw:" \
@@ -317,7 +385,7 @@ jobs:
           python -m pyflakes fetch_sites.py || true
           python fetch_sites.py
 
-      # ---- Étape 2 : mapping/notation (URL conservée) ----
+      # ---- Étape 2 : mapping/notation par GPT (URL conservée) ----
       - name: Write filter_with_gpt.py
         run: |
           set -euo pipefail
@@ -412,6 +480,7 @@ jobs:
           set -euo pipefail
           python filter_with_gpt.py
 
+      # ---- Étape 3 : Email (URL cliquable) ----
       - name: Write email_report.py
         run: |
           set -euo pipefail
