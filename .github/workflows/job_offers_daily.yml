@@ -78,7 +78,7 @@ jobs:
           '}' > filters.json
           cat filters.json
 
-      # ---- Étape 1: Collecte des liens de recherche ----
+      # ---- Étape 1: liens de recherche (France Travail, Indeed, etc.) ----
       - name: Write fetch_sites.py
         run: |
           set -euo pipefail
@@ -111,8 +111,11 @@ jobs:
           printf '%s\n' \
           "import re, json, requests, time, random" \
           "from urllib.parse import urljoin" \
+          "from bs4 import BeautifulSoup" \
+          "" \
           "HDR={\"User-Agent\":\"Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0 Safari/537.36\",\"Accept-Language\":\"fr-FR,fr;q=0.9\"}" \
-          "def fetch(url, limit=30):" \
+          "" \
+          "def fetch(url, limit=18):" \
           "    try:" \
           "        r=requests.get(url,headers=HDR,timeout=limit,allow_redirects=True)" \
           "        if r.status_code==200 and r.text:" \
@@ -120,27 +123,29 @@ jobs:
           "    except Exception:" \
           "        return None" \
           "    return None" \
-          "def compress_html(html, maxlen=25000):" \
-          "    if not html: return None" \
+          "" \
+          "def compress_html(html, maxlen=30000):" \
+          "    if not html: return \"\"" \
           "    html=re.sub(r\"(?is)<script.*?>.*?</script>\",\"\",html)" \
           "    html=re.sub(r\"(?is)<style.*?>.*?</style>\",\"\",html)" \
           "    html=re.sub(r\"(?is)<!--.*?-->\",\"\",html)" \
           "    html=re.sub(r\"\\s+\",\" \",html)" \
           "    return html[:maxlen]" \
+          "" \
           "def is_detail_url(u, src):" \
           "    if not u: return False" \
-          "    s=(src or \"\").lower()" \
-          "    ul=u.lower()" \
+          "    s=(src or \"\").lower(); ul=u.lower()" \
           "    if \"francetravail\" in s or \"francetravail\" in ul:" \
           "        return \"/offres/recherche/detail/\" in ul" \
           "    if \"indeed\" in s or \"indeed\" in ul:" \
           "        return (\"viewjob?\" in ul) or (\"/rc/clk\" in ul)" \
           "    return any(k in ul for k in [\"/detail\",\"/offre\",\"/offres/\",\"/emploi\",\"/job/\"]) and (\"google.\" not in ul and \"search?\" not in ul)" \
-          "def extract_candidate_links(html, base, src, limit=25):" \
+          "" \
+          "def extract_candidate_links(html, base, src, limit=50):" \
           "    if not html: return []" \
-          "    links=re.findall(r\"href=\\\"(.*?)\\\"\", html, flags=re.I)" \
-          "    out=[]" \
-          "    seen=set()" \
+          "    soup=BeautifulSoup(html,\"lxml\")" \
+          "    links=[a.get(\"href\") for a in soup.find_all(\"a\", href=True)]" \
+          "    out=[]; seen=set()" \
           "    for h in links:" \
           "        url=urljoin(base,h)" \
           "        if url in seen: continue" \
@@ -148,27 +153,40 @@ jobs:
           "            seen.add(url); out.append(url)" \
           "            if len(out)>=limit: break" \
           "    return out" \
+          "" \
+          "def hints_from_html(html):" \
+          "    if not html: return (\"\",\"\",\"\")" \
+          "    soup=BeautifulSoup(html,\"lxml\")" \
+          "    title=(soup.title.string.strip() if soup.title and soup.title.string else \"\")" \
+          "    og=soup.find(\"meta\",attrs={\"property\":\"og:title\"})" \
+          "    if og and og.get(\"content\"): title=title or og.get(\"content\",\" \").strip()" \
+          "    text=soup.get_text(separator=\" \", strip=True)" \
+          "    text=re.sub(r\"\\s+\",\" \",text)[:2000]" \
+          "    return (title, text, soup.name or \"\")" \
+          "" \
           "raw=json.load(open(\"offers_raw.json\",\"r\",encoding=\"utf-8\"))" \
-          "detail_pages=[]" \
-          "seen_detail=set()" \
+          "detail_pages=[]; seen_detail=set()" \
+          "" \
           "for it in raw:" \
-          "    src=it.get(\"source\") or \"\"" \
-          "    page=it.get(\"url\") or \"\"" \
+          "    src=it.get(\"source\") or \"\"; page=it.get(\"url\") or \"\"" \
           "    html=fetch(page)" \
-          "    cand=extract_candidate_links(html or \"\", page, src, limit=25)" \
+          "    cand=extract_candidate_links(html or \"\", page, src, limit=40)" \
           "    for du in cand:" \
           "        if du in seen_detail: continue" \
           "        seen_detail.add(du)" \
           "        dh=fetch(du)" \
           "        comp=compress_html(dh)" \
-          "        detail_pages.append({\"source\":src,\"url\":du,\"html\":comp,\"page_type\":\"detail\"})" \
-          "        time.sleep(random.uniform(0.4,0.9))" \
+          "        title_hint, text_snippet, _ = hints_from_html(dh or \"\")" \
+          "        detail_pages.append({\"source\":src,\"url\":du,\"html\":comp,\"text\":text_snippet,\"title_hint\":title_hint,\"page_type\":\"detail\"})" \
+          "        time.sleep(random.uniform(0.35,0.8))" \
+          "" \
           "json.dump(detail_pages, open(\"offers_raw.html.json\",\"w\",encoding=\"utf-8\"), ensure_ascii=False, indent=2)" \
-          "print(\"Detail pages fetched:\", len(detail_pages))" \
+          "print(\"Detail pages fetched:\", len(detail_pages), \"— with_html:\", sum(1 for x in detail_pages if x.get(\"html\")))" \
           > fetch_html.py
+          python -m pyflakes fetch_html.py || true
           python fetch_html.py
 
-      # ---- Étape 2: Extraction/Scoring par GPT (sur HTML de détail) ----
+      # ---- Étape 2: Extraction/Scoring par GPT (HTML de détail) ----
       - name: Write filter_with_gpt.py
         run: |
           set -euo pipefail
@@ -177,23 +195,33 @@ jobs:
           "import backoff, httpx" \
           "from openai import OpenAI" \
           "from openai import APIConnectionError, RateLimitError, APIStatusError, APITimeoutError" \
+          "" \
           "MODEL = os.getenv(\"OPENAI_MODEL\",\"gpt-5\")" \
           "TEMP = float(os.getenv(\"OPENAI_TEMPERATURE\",\"0\"))" \
           "CHUNK_SIZE = int(os.getenv(\"OPENAI_CHUNK_SIZE\",\"16\"))" \
+          "" \
           "client = OpenAI(timeout=httpx.Timeout(180.0, connect=30.0, read=180.0, write=180.0), max_retries=2)" \
+          "" \
           "offers = json.load(open(\"offers_raw.html.json\",\"r\",encoding=\"utf-8\"))" \
           "filters = json.load(open(\"filters.json\",\"r\",encoding=\"utf-8\"))" \
+          "" \
+          "allowed = ', '.join(filters.get('allowed_jobs', []))" \
+          "rules = (\"Scoring 0-100 = logement prioritaire; lieu=France metropolitaine (sans Corse/DOM-COM); duree 7-92 jours; metier ∈ {\" + allowed + \"}.\")" \
+          "" \
           "sys_prompt = {" \
           "  \"role\":\"system\"," \
           "  \"content\":(" \
-          "    \"You receive objects {source, url, html, page_type} where html is a DETAIL PAGE. \"" \
-          "    \"Extract one job per object with fields: \"" \
-          "    \"{title, company, offer_url, offer_id, employer_email, source, score, note}. \"" \
-          "    \"For France Travail, offer_id is the segment after /offres/recherche/detail/. \"" \
-          "    \"Scoring 0-100: housing priority, location=France metropolitaine (no Corse/DOM-COM), duration 7-92 days, job in allowed list. \"" \
-          "    \"Do not invent. If missing, use empty string. Return strict JSON {offers:[{...}]}. \"" \
+          "    \"Tu recois des objets {source, url, html, text, title_hint, page_type}.\\n\"" \
+          "    \"Extrait exactement UNE offre par objet (meme si informations partielles).\\n\"" \
+          "    \"Champs: {title, company, offer_url, offer_id, employer_email, source, score, note}.\\n\"" \
+          "    \"Si informations manquent, mets une chaine vide. Ne pas inventer d'adresse email.\\n\"" \
+          "    \"offer_url = url d'entree si rien d'autre.\\n\"" \
+          "    \"Pour France Travail: offer_id = segment apres /offres/recherche/detail/.\\n\"" \
+          "    \"Scoring: \" + rules + \"\\n\"" \
+          "    \"Reponds UNIQUEMENT en JSON strict {offers:[{...}]}.\"" \
           "  )" \
           "}" \
+          "" \
           "@backoff.on_exception(" \
           "  backoff.expo," \
           "  (APIConnectionError, httpx.RemoteProtocolError, httpx.ConnectError, httpx.ReadTimeout, RateLimitError, APIStatusError, APITimeoutError)," \
@@ -210,10 +238,14 @@ jobs:
           "      {\"role\":\"user\",\"content\": json.dumps(payload, ensure_ascii=False)}" \
           "    ]" \
           "  )" \
+          "" \
           "def chunks(lst, n):" \
           "  for i in range(0, len(lst), n):" \
           "    yield lst[i:i+n]" \
+          "" \
           "agg=[]" \
+          "non_empty = sum(1 for it in offers if (it.get('html') or it.get('text')))" \
+          "print('Inputs:', len(offers), 'with content:', non_empty)" \
           "for idx, part in enumerate(chunks(offers, CHUNK_SIZE), start=1):" \
           "  payload={\"filters\":filters, \"offers\":part}" \
           "  try:" \
@@ -224,6 +256,7 @@ jobs:
           "    out=[]" \
           "  agg.extend(out)" \
           "  print(f\"Chunk {idx}: +{len(out)} items\")" \
+          "" \
           "seen=set(); dedup=[]" \
           "for it in agg:" \
           "  url=(it.get(\"offer_url\") or it.get(\"url\") or \"\").strip()" \
@@ -231,19 +264,14 @@ jobs:
           "  key=url or oid or ((it.get(\"source\") or \"\")+\"|\"+(it.get(\"title\") or \"\")+\"|\"+(it.get(\"company\") or \"\"))" \
           "  if key and key not in seen:" \
           "    seen.add(key); dedup.append(it)" \
+          "" \
           "json.dump({\"offers\":dedup}, open(\"offers_filtered.json\",\"w\",encoding=\"utf-8\"), ensure_ascii=False, indent=2)" \
           "print(\"Done. Total items:\", len(dedup))" \
           > filter_with_gpt.py
           python -m pyflakes filter_with_gpt.py || true
-
-      - name: Run filtering (GPT)
-        env:
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-        run: |
-          set -euo pipefail
           python filter_with_gpt.py
 
-      # ---- Étape 3: Email formaté (URL cliquable) ----
+      # ---- Étape 3: Email (URL cliquable, sans répétition de source) ----
       - name: Write email_report.py
         run: |
           set -euo pipefail
@@ -270,15 +298,8 @@ jobs:
           "    return \"\"" \
           "data = json.load(open(\"offers_filtered.json\",\"r\",encoding=\"utf-8\"))" \
           "items = data.get(\"offers\", []) if isinstance(data, dict) else []" \
-          "clean=[]" \
-          "for it in items:" \
-          "    title=(it.get(\"title\") or \"\").lower()" \
-          "    link=build_link(it)" \
-          "    if ((\"offre\" in title and \"emploi\" in title) or \"recherche\" in title) and (\"/detail/\" not in link):" \
-          "        continue" \
-          "    clean.append(it)" \
-          "html=[\"<h2>Offres saisonnières - Rapport</h2>\",\"<ol>\"]" \
-          "for it in clean[:200]:" \
+          "html=[\"<h2>Offres saisonnieres - Rapport</h2>\",\"<ol>\"]" \
+          "for it in items[:200]:" \
           "    src=pretty_source(it.get(\"source\",\"?\"))" \
           "    title=(it.get(\"title_scraped\") or it.get(\"title\") or \"Offre\").strip()" \
           "    tl=title.lower(); sl=src.lower()" \
@@ -287,12 +308,12 @@ jobs:
           "    score=str(it.get(\"score\",\"?\"))" \
           "    mail=(it.get(\"employer_email_scraped\") or it.get(\"employer_email\") or \"—\").strip()" \
           "    link=build_link(it)" \
-          "    url_field = (\"<a href=\\\"\"+link+\"\\\">URL</a>\") if link else \"URL indisponible\"" \
+          "    url_field = (\"<a href=\"+\"\\\"\"+link+\"\\\"\"+\">URL</a>\") if link else \"URL indisponible\"" \
           "    line = \"{0}: {1} - {2} - Score: {3} - {4} - {5}\"" \
           "    li = \"<li>\" + line.format(src, title, company, score, url_field, mail) + \"</li>\"" \
           "    html.append(li)" \
           "html.append(\"</ol>\")" \
-          "msg=MIMEMultipart(\"alternative\"); msg[\"Subject\"]=\"Veille offres saisonnières (extraction HTML via GPT)\"; msg[\"From\"]=SENDER; msg[\"To\"]=RECIPIENT" \
+          "msg=MIMEMultipart(\"alternative\"); msg[\"Subject\"]=\"Veille offres saisonnieres (extraction HTML via GPT)\"; msg[\"From\"]=SENDER; msg[\"To\"]=RECIPIENT" \
           "msg.attach(MIMEText(\"\\n\".join(html),\"html\",\"utf-8\"))" \
           "with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as s:" \
           "    s.starttls(); s.login(SMTP_USER, SMTP_PASS); s.sendmail(SMTP_USER, [x.strip() for x in RECIPIENT.split(\",\") if x.strip()], msg.as_string())" \
@@ -309,6 +330,7 @@ jobs:
           SMTP_PASS: ${{ secrets.SMTP_PASS }}
         run: |
           set -euo pipefail
+          python -m pyflakes email_report.py || true
           python email_report.py
 
       - name: Upload artifacts
