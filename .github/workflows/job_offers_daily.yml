@@ -78,7 +78,7 @@ jobs:
           '}' > filters.json
           cat filters.json
 
-      # ---- Étape 1 : récolte d'annonces avec LIENS DIRECTS (regex-friendly) ----
+      # ---- Étape 1 : récolte (avec fallback anti-bot r.jina.ai) ----
       - name: Write fetch_sites.py
         run: |
           set -euo pipefail
@@ -92,7 +92,11 @@ jobs:
           "if not terms:" \
           "    terms = ['serveur logé','aide barman logé','runner logé','vendanges logé','ouvrier cave logé','aide caviste logé','employé polyvalent logé','cueilleur logé']" \
           "" \
-          "HEADERS = {'User-Agent':'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36'}" \
+          "HEADERS = {" \
+          "  'User-Agent':'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36'," \
+          "  'Accept':'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'," \
+          "  'Accept-Language':'fr-FR,fr;q=0.9,en;q=0.8'," \
+          "}" \
           "" \
           "def q(s):" \
           "    try:" \
@@ -101,192 +105,208 @@ jobs:
           "    except Exception:" \
           "        return s" \
           "" \
-          "def get(url, max_tries=3, timeout=20):" \
-          "    for i in range(max_tries):" \
+          "def fetch_text(url, timeout=20, tries=3):" \
+          "    # 1/ direct ; 2/ via r.jina.ai/https:// ; 3/ via r.jina.ai/http://" \
+          "    backoffs = [0.6, 0.9, 1.2]" \
+          "    for i in range(tries):" \
           "        try:" \
-          "            r = requests.get(url, headers=HEADERS, timeout=timeout)" \
-          "            if r.status_code == 200 and r.text:" \
+          "            r = requests.get(url, headers=HEADERS, timeout=timeout, allow_redirects=True)" \
+          "            if r.status_code == 200 and r.text and len(r.text) > 5000:" \
           "                return r.text" \
           "        except Exception:" \
           "            pass" \
-          "        time.sleep(0.8 + 0.6*random.random())" \
+          "        time.sleep(backoffs[min(i, len(backoffs)-1)])" \
+          "        # try proxy renders" \
+          "        for base in ('https://r.jina.ai/https://','https://r.jina.ai/http://'):" \
+          "            try:" \
+          "                prox = base + url.split('://',1)[-1]" \
+          "                r = requests.get(prox, headers={'User-Agent':HEADERS['User-Agent']}, timeout=timeout)" \
+          "                if r.status_code == 200 and r.text and len(r.text) > 2000:" \
+          "                    return r.text" \
+          "            except Exception:" \
+          "                continue" \
           "    return ''" \
           "" \
           "def keep_if_housing(title: str) -> bool:" \
           "    t = (title or '').lower()" \
           "    return ('logé' in t) or ('logement' in t) or ('loge' in t) or ('logee' in t)" \
           "" \
-          "def add_items(out, items, max_keep=20):" \
+          "def add_items(out, items, max_keep=30):" \
           "    filt = [it for it in items if keep_if_housing(it.get('title'))]" \
           "    if filt:" \
           "        out.extend(filt)" \
           "    else:" \
           "        out.extend(items[:max_keep])" \
           "" \
-          "# -------- France Travail : /offres/recherche/detail/<ID> --------" \
-          "def crawl_france_travail(term, max_items=80):" \
+          "# -------- France Travail --------" \
+          "def crawl_france_travail(term, max_items=120):" \
           "    url = f'https://candidat.francetravail.fr/offres/recherche?k={q(term)}&l=France'" \
-          "    html = get(url)" \
+          "    html = fetch_text(url)" \
           "    out = []" \
           "    if not html:" \
           "        return out" \
-          "    for m in re.finditer(r'/offres/recherche/detail/([A-Za-z0-9_-]+)', html):" \
+          "    seen=set()" \
+          "    for m in re.finditer(r'/offres/recherche/detail/([A-Za-z0-9_-]{6,})', html):" \
           "        oid = m.group(1)" \
           "        href = f'https://candidat.francetravail.fr/offres/recherche/detail/{oid}'" \
+          "        if href in seen: continue" \
+          "        seen.add(href)" \
           "        out.append({'source':'francetravail','title':f'Offre {oid}','url':href,'offer_id':oid})" \
           "        if len(out) >= max_items: break" \
-          "    if out:" \
-          "        try:" \
-          "            soup = BeautifulSoup(html, 'lxml')" \
-          "            for a in soup.find_all('a', href=True):" \
-          "                href = a['href']" \
-          "                if href.startswith('/'): href = 'https://candidat.francetravail.fr' + href" \
-          "                m = re.search(r'/offres/recherche/detail/([A-Za-z0-9_-]+)', href)" \
-          "                if not m: continue" \
-          "                oid = m.group(1)" \
-          "                for it in out:" \
-          "                    if it.get('offer_id') == oid:" \
-          "                        t = a.get_text(strip=True)" \
-          "                        if t: it['title'] = t" \
-          "        except Exception:" \
-          "            pass" \
+          "    # essayer de remplacer les titres par du texte lisible si présent" \
+          "    try:" \
+          "        soup = BeautifulSoup(html, 'lxml')" \
+          "        for a in soup.find_all('a', href=True):" \
+          "            href = a['href']" \
+          "            if href.startswith('/'): href = 'https://candidat.francetravail.fr' + href" \
+          "            m = re.search(r'/offres/recherche/detail/([A-Za-z0-9_-]{6,})', href)" \
+          "            if not m: continue" \
+          "            oid = m.group(1)" \
+          "            t = a.get_text(strip=True)" \
+          "            if not t: continue" \
+          "            for it in out:" \
+          "                if it['offer_id']==oid: it['title']=t" \
+          "    except Exception:" \
+          "        pass" \
           "    return out" \
           "" \
-          "# -------- Indeed FR : construire via data-jk --------" \
-          "def crawl_indeed(term, max_items=80):" \
+          "# -------- Indeed --------" \
+          "def crawl_indeed(term, max_items=120):" \
           "    url = f'https://fr.indeed.com/jobs?q={q(term)}&l=France'" \
-          "    html = get(url)" \
-          "    out = []" \
+          "    html = fetch_text(url)" \
+          "    out=[]" \
           "    if not html:" \
           "        return out" \
-          "    seen = set()" \
-          "    for m in re.finditer(r'data-jk\\s*=\\s*[\\\"\\']([a-fA-F0-9]+)[\\\"\\']', html):" \
+          "    seen=set()" \
+          "    # data-jk + icid variations" \
+          "    for m in re.finditer(r'data-jk\\s*=\\s*[\\\"\\']([A-Za-z0-9]+)[\\\"\\']', html):" \
           "        jk = m.group(1)" \
           "        href = f'https://fr.indeed.com/viewjob?jk={jk}'" \
           "        if href in seen: continue" \
           "        seen.add(href)" \
           "        out.append({'source':'indeed','title':'Offre Indeed','url':href})" \
           "        if len(out) >= max_items: break" \
-          "    try:" \
-          "        soup = BeautifulSoup(html, 'lxml')" \
-          "        titles = [t.get_text(strip=True) for t in soup.find_all(['h2','a']) if t.get_text(strip=True)]" \
-          "        for i, it in enumerate(out):" \
-          "            if i < len(titles) and keep_if_housing(titles[i]): it['title'] = titles[i]" \
-          "    except Exception:" \
-          "        pass" \
+          "    # bonus: certains liens SSR /viewjob?jk=... déjà présents" \
+          "    for m in re.finditer(r'href=\\\"(/viewjob\\?[^\\\"#]*jk=[A-Za-z0-9]+[^\\\"]*)\\\"', html):" \
+          "        path=m.group(1)" \
+          "        href='https://fr.indeed.com'+path" \
+          "        if href in seen: continue" \
+          "        seen.add(href)" \
+          "        out.append({'source':'indeed','title':'Offre Indeed','url':href})" \
+          "        if len(out) >= max_items: break" \
           "    return out" \
           "" \
-          "# -------- Manpower FR : /offres-emploi/… --------" \
-          "def crawl_manpower(term, max_items=80):" \
+          "# -------- Manpower --------" \
+          "def crawl_manpower(term, max_items=120):" \
           "    url = f'https://www.manpower.fr/recherche-emploi?motsCles={q(term)}&lieu=France'" \
-          "    html = get(url)" \
-          "    out = []" \
+          "    html = fetch_text(url)" \
+          "    out=[]" \
           "    if not html:" \
           "        return out" \
-          "    seen = set()" \
+          "    seen=set()" \
           "    for m in re.finditer(r'href=\\\"(/offres-emploi/[^\\\"#?]+)\\\"', html):" \
           "        path = m.group(1)" \
-          "        href = 'https://www.manpower.fr' + path" \
+          "        href = 'https://www.manpower.fr'+path" \
           "        if href in seen: continue" \
           "        seen.add(href)" \
           "        out.append({'source':'manpower','title':'Offre Manpower','url':href})" \
           "        if len(out) >= max_items: break" \
           "    return out" \
           "" \
-          "# -------- Leboncoin : tentative regex (souvent vide en CI) --------" \
-          "def crawl_leboncoin(term, max_items=40):" \
+          "# -------- Leboncoin (souvent vide en CI) --------" \
+          "def crawl_leboncoin(term, max_items=60):" \
           "    url = f'https://www.leboncoin.fr/recherche?category=10&text={q(term)}&locations=France'" \
-          "    html = get(url)" \
-          "    out = []" \
+          "    html = fetch_text(url)" \
+          "    out=[]" \
           "    if not html:" \
           "        return out" \
-          "    seen = set()" \
+          "    seen=set()" \
           "    for m in re.finditer(r'href=\\\"(/ad/[^\\\"#]+\\.htm)\\\"', html):" \
-          "        path = m.group(1)" \
-          "        href = 'https://www.leboncoin.fr' + path" \
+          "        path=m.group(1)" \
+          "        href='https://www.leboncoin.fr'+path" \
           "        if href in seen: continue" \
           "        seen.add(href)" \
           "        out.append({'source':'leboncoin','title':'Offre Leboncoin','url':href})" \
           "        if len(out) >= max_items: break" \
           "    return out" \
           "" \
-          "# -------- Adzuna FR : /details/<id> --------" \
-          "def crawl_adzuna(term, max_items=80):" \
+          "# -------- Adzuna --------" \
+          "def crawl_adzuna(term, max_items=120):" \
           "    url = f'https://www.adzuna.fr/search?what={q(term)}&where=France'" \
-          "    html = get(url)" \
-          "    out = []" \
+          "    html = fetch_text(url)" \
+          "    out=[]" \
           "    if not html:" \
           "        return out" \
-          "    seen = set()" \
+          "    seen=set()" \
           "    for m in re.finditer(r'href=\\\"(/details/[^\\\"#?]+)\\\"', html):" \
-          "        path = m.group(1)" \
-          "        href = 'https://www.adzuna.fr' + path" \
+          "        path=m.group(1)" \
+          "        href='https://www.adzuna.fr'+path" \
           "        if href in seen: continue" \
           "        seen.add(href)" \
           "        out.append({'source':'adzuna','title':'Offre Adzuna','url':href})" \
           "        if len(out) >= max_items: break" \
           "    return out" \
           "" \
-          "# -------- MeteoJob : /job/<slug>-<id>.html --------" \
-          "def crawl_meteojob(term, max_items=80):" \
+          "# -------- MeteoJob --------" \
+          "def crawl_meteojob(term, max_items=120):" \
           "    url = f'https://www.meteojob.com/emploi?q={q(term)}&l=France'" \
-          "    html = get(url)" \
-          "    out = []" \
+          "    html = fetch_text(url)" \
+          "    out=[]" \
           "    if not html:" \
           "        return out" \
-          "    seen = set()" \
+          "    seen=set()" \
           "    for m in re.finditer(r'href=\\\"(/job/[^\\\"#?]+\\.html)\\\"', html):" \
-          "        path = m.group(1)" \
-          "        href = 'https://www.meteojob.com' + path" \
+          "        path=m.group(1)" \
+          "        href='https://www.meteojob.com'+path" \
           "        if href in seen: continue" \
           "        seen.add(href)" \
           "        out.append({'source':'meteojob','title':'Offre MeteoJob','url':href})" \
           "        if len(out) >= max_items: break" \
           "    return out" \
           "" \
-          "# -------- HelloWork : SSR OK --------" \
-          "def crawl_hellowork(term, max_items=80):" \
+          "# -------- HelloWork (SSR OK) --------" \
+          "def crawl_hellowork(term, max_items=120):" \
           "    url = f'https://www.hellowork.com/fr-fr/emploi/recherche.html?k={q(term)}&l=France'" \
-          "    html = get(url)" \
-          "    out = []" \
+          "    html = fetch_text(url)" \
+          "    out=[]" \
           "    if not html:" \
           "        return out" \
-          "    soup = BeautifulSoup(html, 'lxml')" \
-          "    seen = set()" \
+          "    soup=BeautifulSoup(html,'lxml')" \
+          "    seen=set()" \
           "    for a in soup.find_all('a', href=True):" \
-          "        href = a['href']" \
-          "        if href.startswith('/'): href = 'https://www.hellowork.com' + href" \
+          "        href=a['href']" \
+          "        if href.startswith('/'): href='https://www.hellowork.com'+href" \
           "        if '/fr-fr/emplois/' in href and href.endswith('.html'):" \
           "            if href in seen: continue" \
           "            seen.add(href)" \
-          "            title = a.get_text(strip=True) or 'Offre HelloWork'" \
+          "            title=a.get_text(strip=True) or 'Offre HelloWork'" \
           "            out.append({'source':'hellowork','title':title,'url':href})" \
-          "            if len(out) >= max_items: break" \
+          "            if len(out)>=max_items: break" \
           "    return out" \
           "" \
           "DISPATCH = {" \
-          "    'francetravail': crawl_france_travail," \
-          "    'indeed':        crawl_indeed," \
-          "    'manpower':      crawl_manpower," \
-          "    'leboncoin':     crawl_leboncoin," \
-          "    'adzuna':        crawl_adzuna," \
-          "    'meteojob':      crawl_meteojob," \
-          "    'hellowork':     crawl_hellowork," \
+          "  'francetravail': crawl_france_travail," \
+          "  'indeed':        crawl_indeed," \
+          "  'manpower':      crawl_manpower," \
+          "  'leboncoin':     crawl_leboncoin," \
+          "  'adzuna':        crawl_adzuna," \
+          "  'meteojob':      crawl_meteojob," \
+          "  'hellowork':     crawl_hellowork," \
           "}" \
           "" \
-          "raw = []" \
-          "per_source = {k:0 for k in SITES}" \
+          "raw=[]" \
+          "per_source={k:0 for k in SITES}" \
           "for site in SITES:" \
-          "    fn = DISPATCH.get(site)" \
+          "    fn=DISPATCH.get(site)" \
           "    if not fn: continue" \
           "    for t in terms:" \
-          "        items = fn(t)" \
-          "        add_items(raw, items, max_keep=20)" \
-          "        per_source[site] += len(items)" \
+          "        items=fn(t)" \
+          "        add_items(raw, items, max_keep=30)" \
+          "        per_source[site]+=len(items)" \
           "" \
-          "seen = set(); dedup = []" \
+          "seen=set(); dedup=[]" \
           "for it in raw:" \
-          "    u = (it.get('url') or '').strip()" \
+          "    u=(it.get('url') or '').strip()" \
           "    if u and u not in seen:" \
           "        seen.add(u); dedup.append(it)" \
           "" \
@@ -297,7 +317,7 @@ jobs:
           python -m pyflakes fetch_sites.py || true
           python fetch_sites.py
 
-      # ---- Étape 2 : mapping/notation par GPT — 1 sortie PAR ANNONCE (URL conservée) ----
+      # ---- Étape 2 : mapping/notation (URL conservée) ----
       - name: Write filter_with_gpt.py
         run: |
           set -euo pipefail
@@ -392,7 +412,6 @@ jobs:
           set -euo pipefail
           python filter_with_gpt.py
 
-      # ---- Étape 3 : Email (URL cliquable, format strict) ----
       - name: Write email_report.py
         run: |
           set -euo pipefail
