@@ -10,7 +10,6 @@ on:
         default: "serveur logé, aide barman logé, runner logé, vendanges logé, ouvrier cave logé, aide caviste logé, employé polyvalent logé, cueilleur logé"
 
   schedule:
-    # 09:00 Europe/Paris = 07:00 UTC (été) et 08:00 UTC (hiver)
     - cron: "0 7 * * *"
     - cron: "0 8 * * *"
 
@@ -21,7 +20,7 @@ jobs:
       TZ: Europe/Paris
       OPENAI_MODEL: gpt-5
       OPENAI_TEMPERATURE: "0"
-      OPENAI_CHUNK_SIZE: "12"
+      OPENAI_CHUNK_SIZE: "16"
 
     steps:
       - name: Checkout
@@ -37,7 +36,7 @@ jobs:
           set -euo pipefail
           python -m pip install --upgrade pip
           pip install "httpx<0.28"
-          pip install requests beautifulsoup4 lxml html5lib backoff "openai==1.51.0"
+          pip install requests beautifulsoup4 lxml html5lib backoff "openai==1.51.0" pyflakes
 
       - name: Guard 09:00 Europe/Paris (éviter les doublons)
         env:
@@ -50,7 +49,6 @@ jobs:
             exit 0
           fi
 
-      # ---- Config ----
       - name: Write sites.json
         run: |
           set -euo pipefail
@@ -84,103 +82,118 @@ jobs:
       - name: Write fetch_sites.py
         run: |
           set -euo pipefail
-          printf "%s\n" \
+          printf '%s\n' \
           "import json, os, requests" \
-          "SITES = json.load(open('sites.json','r',encoding='utf-8'))" \
-          "TERMS = os.getenv('SEARCH_TERMS','').strip() or \"${{ github.event.inputs.search_terms }}\"" \
+          "SITES = json.load(open(\"sites.json\",\"r\",encoding=\"utf-8\"))" \
+          "TERMS = os.getenv(\"SEARCH_TERMS\", \"\").strip() or \"${{ github.event.inputs.search_terms }}\"" \
           "def q(s): return requests.utils.quote(s)" \
-          "" \
-          "def results_indeed(t):" \
-          "    return [{'source':'indeed','url':f'https://fr.indeed.com/jobs?q={q(t)}+log%C3%A9&l=France','title':'Indeed search: '+t}]" \
-          "def results_hellowork(t):" \
-          "    return [{'source':'hellowork','url':f'https://www.hellowork.com/fr-fr/emploi/recherche.html?k={q(t)}+logement','title':'HelloWork : '+t}]" \
-          "def results_francetravail(t):" \
-          "    return [{'source':'francetravail','url':f'https://candidat.francetravail.fr/offres/recherche?k={q(t)}&l=France','title':'France Travail : '+t}]" \
-          "def results_simple(engine, t):" \
-          "    return [{'source':engine,'url':f'https://www.google.com/search?q=site%3A{engine}.com+{q(t)}+log%C3%A9+France','title':engine+' via Google'}]" \
-          "" \
-          "DISPATCH = {'indeed':results_indeed,'hellowork':results_hellowork,'francetravail':results_francetravail}" \
-          "" \
+          "def results_indeed(t): return [{\"source\":\"indeed\",\"url\":f\"https://fr.indeed.com/jobs?q={q(t)}+log%C3%A9&l=France\",\"title\":\"Indeed search: \"+t}]" \
+          "def results_hellowork(t): return [{\"source\":\"hellowork\",\"url\":f\"https://www.hellowork.com/fr-fr/emploi/recherche.html?k={q(t)}+logement\",\"title\":\"HelloWork : \"+t}]" \
+          "def results_francetravail(t): return [{\"source\":\"francetravail\",\"url\":f\"https://candidat.francetravail.fr/offres/recherche?k={q(t)}&l=France\",\"title\":\"France Travail : \"+t}]" \
+          "def results_simple(engine, t): return [{\"source\":engine,\"url\":f\"https://www.google.com/search?q=site%3A{engine}.com+{q(t)}+log%C3%A9+France\",\"title\":engine+\" via Google\"}]" \
+          "DISPATCH = {\"indeed\":results_indeed,\"hellowork\":results_hellowork,\"francetravail\":results_francetravail}" \
           "raw=[]" \
-          "terms=[x.strip() for x in TERMS.split(',') if x.strip()] or ['serveur logé','aide barman logé','runner logé','vendanges logé','ouvrier cave logé','aide caviste logé','employé polyvalent logé','cueilleur logé']" \
+          "terms=[x.strip() for x in TERMS.split(\",\") if x.strip()] or [\"serveur logé\",\"aide barman logé\",\"runner logé\",\"vendanges logé\",\"ouvrier cave logé\",\"aide caviste logé\",\"employé polyvalent logé\",\"cueilleur logé\"]" \
           "for site in SITES:" \
           "  for t in terms:" \
           "    fn=DISPATCH.get(site)" \
           "    raw.extend(fn(t) if fn else results_simple(site,t))" \
-          "json.dump(raw, open('offers_raw.json','w',encoding='utf-8'), ensure_ascii=False, indent=2)" \
-          "print('Collected seeds:', len(raw))" \
+          "json.dump(raw, open(\"offers_raw.json\",\"w\",encoding=\"utf-8\"), ensure_ascii=False, indent=2)" \
+          "print(\"Collected seeds:\", len(raw))" \
           > fetch_sites.py
+          python -m pyflakes fetch_sites.py || true
           python fetch_sites.py
 
-      # ---- Étape 1b: Télécharger le HTML de chaque page ----
+      # ---- Étape 1b: détecter des liens de DÉTAIL et télécharger leur HTML ----
       - name: Write fetch_html.py
         run: |
           set -euo pipefail
-          printf "%s\n" \
-          "import json, requests, time, random" \
-          "HDR={'User-Agent':'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0 Safari/537.36','Accept-Language':'fr-FR,fr;q=0.9'}" \
-          "def grab(url):" \
+          printf '%s\n' \
+          "import re, json, requests, time, random" \
+          "from urllib.parse import urljoin" \
+          "HDR={\"User-Agent\":\"Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0 Safari/537.36\",\"Accept-Language\":\"fr-FR,fr;q=0.9\"}" \
+          "def fetch(url, limit=15):" \
           "    try:" \
-          "        r=requests.get(url,headers=HDR,timeout=15,allow_redirects=True)" \
+          "        r=requests.get(url,headers=HDR,timeout=limit,allow_redirects=True)" \
           "        if r.status_code==200 and r.text:" \
-          "            return r.text[:60000]" \
+          "            return r.text" \
           "    except Exception:" \
           "        return None" \
           "    return None" \
-          "data=json.load(open('offers_raw.json','r',encoding='utf-8'))" \
-          "out=[]" \
-          "for it in data:" \
-          "    url=it.get('url') or ''" \
-          "    html=grab(url) if url else None" \
-          "    it2=dict(it)" \
-          "    it2['html']=html" \
-          "    it2['page_type']='detail' if '/detail/' in (url or '') else 'search'" \
-          "    out.append(it2)" \
-          "    time.sleep(random.uniform(0.6,1.2))" \
-          "json.dump(out,open('offers_raw.html.json','w',encoding='utf-8'),ensure_ascii=False,indent=2)" \
-          "print('Fetched HTML for',len(out),'pages')" \
+          "def compress_html(html, maxlen=25000):" \
+          "    if not html: return None" \
+          "    html=re.sub(r\"(?is)<script.*?>.*?</script>\",\"\",html)" \
+          "    html=re.sub(r\"(?is)<style.*?>.*?</style>\",\"\",html)" \
+          "    html=re.sub(r\"(?is)<!--.*?-->\",\"\",html)" \
+          "    html=re.sub(r\"\\s+\",\" \",html)" \
+          "    return html[:maxlen]" \
+          "def is_detail_url(u, src):" \
+          "    if not u: return False" \
+          "    s=(src or \"\").lower()" \
+          "    ul=u.lower()" \
+          "    if \"francetravail\" in s or \"francetravail\" in ul:" \
+          "        return \"/offres/recherche/detail/\" in ul" \
+          "    if \"indeed\" in s or \"indeed\" in ul:" \
+          "        return (\"viewjob?\" in ul) or (\"/rc/clk\" in ul)" \
+          "    return any(k in ul for k in [\"/detail\",\"/offre\",\"/offres/\",\"/emploi\",\"/job/\"]) and (\"google.\" not in ul and \"search?\" not in ul)" \
+          "def extract_candidate_links(html, base, src, limit=25):" \
+          "    if not html: return []" \
+          "    links=re.findall(r\"href=\\\"(.*?)\\\"\", html, flags=re.I)" \
+          "    out=[]" \
+          "    seen=set()" \
+          "    for h in links:" \
+          "        url=urljoin(base,h)" \
+          "        if url in seen: continue" \
+          "        if is_detail_url(url, src):" \
+          "            seen.add(url); out.append(url)" \
+          "            if len(out)>=limit: break" \
+          "    return out" \
+          "raw=json.load(open(\"offers_raw.json\",\"r\",encoding=\"utf-8\"))" \
+          "detail_pages=[]" \
+          "seen_detail=set()" \
+          "for it in raw:" \
+          "    src=it.get(\"source\") or \"\"" \
+          "    page=it.get(\"url\") or \"\"" \
+          "    html=fetch(page)" \
+          "    cand=extract_candidate_links(html or \"\", page, src, limit=25)" \
+          "    for du in cand:" \
+          "        if du in seen_detail: continue" \
+          "        seen_detail.add(du)" \
+          "        dh=fetch(du)" \
+          "        comp=compress_html(dh)" \
+          "        detail_pages.append({\"source\":src,\"url\":du,\"html\":comp,\"page_type\":\"detail\"})" \
+          "        time.sleep(random.uniform(0.4,0.9))" \
+          "json.dump(detail_pages, open(\"offers_raw.html.json\",\"w\",encoding=\"utf-8\"), ensure_ascii=False, indent=2)" \
+          "print(\"Detail pages fetched:\", len(detail_pages))" \
           > fetch_html.py
           python fetch_html.py
 
-      - name: Debug workspace (after fetch)
-        run: |
-          set -euo pipefail
-          pwd
-          ls -la
-
-      # ---- Étape 2: Extraction/Scoring par GPT (sur HTML) ----
+      # ---- Étape 2: Extraction/Scoring par GPT (sur HTML de détail) ----
       - name: Write filter_with_gpt.py
         run: |
           set -euo pipefail
-          printf "%s\n" \
+          printf '%s\n' \
           "import json, os" \
           "import backoff, httpx" \
           "from openai import OpenAI" \
           "from openai import APIConnectionError, RateLimitError, APIStatusError, APITimeoutError" \
-          "" \
-          "MODEL = os.getenv('OPENAI_MODEL','gpt-5')" \
-          "TEMP = float(os.getenv('OPENAI_TEMPERATURE','0'))" \
-          "CHUNK_SIZE = int(os.getenv('OPENAI_CHUNK_SIZE','12'))" \
-          "" \
+          "MODEL = os.getenv(\"OPENAI_MODEL\",\"gpt-5\")" \
+          "TEMP = float(os.getenv(\"OPENAI_TEMPERATURE\",\"0\"))" \
+          "CHUNK_SIZE = int(os.getenv(\"OPENAI_CHUNK_SIZE\",\"16\"))" \
           "client = OpenAI(timeout=httpx.Timeout(180.0, connect=30.0, read=180.0, write=180.0), max_retries=2)" \
-          "" \
-          "offers = json.load(open('offers_raw.html.json','r',encoding='utf-8'))" \
-          "filters = json.load(open('filters.json','r',encoding='utf-8'))" \
-          "" \
+          "offers = json.load(open(\"offers_raw.html.json\",\"r\",encoding=\"utf-8\"))" \
+          "filters = json.load(open(\"filters.json\",\"r\",encoding=\"utf-8\"))" \
           "sys_prompt = {" \
-          "  'role':'system'," \
-          "  'content':(" \
-          "    'Tu reçois une liste d\\'objets {source, url, title, html, page_type}. '" \
-          "    'Si html est une page de RECHERCHE (listings), EXTRAYs jusqu\\'à 20 annonces unitaires: '" \
-          "    '{title, company, offer_url, offer_id, employer_email, source, score, note}. '" \
-          "    'Pour France Travail, l\\'offer_id = le segment après /detail/ dans l\\'URL. '" \
-          "    'N\\'INVENTE PAS : prends les <a href> présents dans le HTML et renvoie des URLs complètes quand possible. '" \
-          "    'Si html est une page D\\'ANNONCE, extrais ces mêmes champs pour CETTE annonce. '" \
-          "    'Score 0-100 basé sur: logement (priorité max), lieu = métropole (hors Corse/DOM-COM), durée 7-92 jours, métier autorisé. '" \
-          "    'Retourne EXCLUSIVEMENT du JSON {offers:[{...}]}. '" \
+          "  \"role\":\"system\"," \
+          "  \"content\":(" \
+          "    \"You receive objects {source, url, html, page_type} where html is a DETAIL PAGE. \"" \
+          "    \"Extract one job per object with fields: \"" \
+          "    \"{title, company, offer_url, offer_id, employer_email, source, score, note}. \"" \
+          "    \"For France Travail, offer_id is the segment after /offres/recherche/detail/. \"" \
+          "    \"Scoring 0-100: housing priority, location=France metropolitaine (no Corse/DOM-COM), duration 7-92 days, job in allowed list. \"" \
+          "    \"Do not invent. If missing, use empty string. Return strict JSON {offers:[{...}]}. \"" \
           "  )" \
           "}" \
-          "" \
           "@backoff.on_exception(" \
           "  backoff.expo," \
           "  (APIConnectionError, httpx.RemoteProtocolError, httpx.ConnectError, httpx.ReadTimeout, RateLimitError, APIStatusError, APITimeoutError)," \
@@ -191,52 +204,37 @@ jobs:
           "  return client.chat.completions.create(" \
           "    model=MODEL," \
           "    temperature=TEMP," \
-          "    response_format={'type':'json_object'}," \
+          "    response_format={\"type\":\"json_object\"}," \
           "    messages=[" \
           "      sys_prompt," \
-          "      {'role':'user','content': json.dumps(payload, ensure_ascii=False)}" \
+          "      {\"role\":\"user\",\"content\": json.dumps(payload, ensure_ascii=False)}" \
           "    ]" \
           "  )" \
-          "" \
           "def chunks(lst, n):" \
           "  for i in range(0, len(lst), n):" \
           "    yield lst[i:i+n]" \
-          "" \
-          "def process_part(part):" \
-          "  payload = {'filters': filters, 'offers': part}" \
-          "  try:" \
-          "    resp = call_openai(payload)" \
-          "    data = json.loads(resp.choices[0].message.content)" \
-          "    return data.get('offers', [])" \
-          "  except Exception:" \
-          "    return []" \
-          "" \
           "agg=[]" \
           "for idx, part in enumerate(chunks(offers, CHUNK_SIZE), start=1):" \
-          "  out = process_part(part)" \
+          "  payload={\"filters\":filters, \"offers\":part}" \
+          "  try:" \
+          "    resp=call_openai(payload)" \
+          "    data=json.loads(resp.choices[0].message.content)" \
+          "    out=data.get(\"offers\",[])" \
+          "  except Exception:" \
+          "    out=[]" \
           "  agg.extend(out)" \
-          "  print(f'Chunk {idx}: +{len(out)} items')" \
-          "" \
-          "# dédoublonnage par URL/ID/titre+entreprise" \
+          "  print(f\"Chunk {idx}: +{len(out)} items\")" \
           "seen=set(); dedup=[]" \
           "for it in agg:" \
-          "  url=(it.get('offer_url') or it.get('url') or '').strip()" \
-          "  oid=(it.get('offer_id') or '').strip()" \
-          "  key = url or oid or ((it.get('source') or '')+'|'+(it.get('title') or '')+'|'+(it.get('company') or ''))" \
+          "  url=(it.get(\"offer_url\") or it.get(\"url\") or \"\").strip()" \
+          "  oid=(it.get(\"offer_id\") or \"\").strip()" \
+          "  key=url or oid or ((it.get(\"source\") or \"\")+\"|\"+(it.get(\"title\") or \"\")+\"|\"+(it.get(\"company\") or \"\"))" \
           "  if key and key not in seen:" \
           "    seen.add(key); dedup.append(it)" \
-          "" \
-          "json.dump({'offers':dedup}, open('offers_filtered.json','w',encoding='utf-8'), ensure_ascii=False, indent=2)" \
-          "print('Done. Total items:', len(dedup))" \
+          "json.dump({\"offers\":dedup}, open(\"offers_filtered.json\",\"w\",encoding=\"utf-8\"), ensure_ascii=False, indent=2)" \
+          "print(\"Done. Total items:\", len(dedup))" \
           > filter_with_gpt.py
-
-      - name: Assert filter_with_gpt.py exists
-        run: |
-          set -euo pipefail
-          test -f filter_with_gpt.py
-          echo "filter_with_gpt.py present:"
-          wc -l filter_with_gpt.py | awk '{print $1" lines"}'
-          head -n 20 filter_with_gpt.py
+          python -m pyflakes filter_with_gpt.py || true
 
       - name: Run filtering (GPT)
         env:
@@ -245,68 +243,60 @@ jobs:
           set -euo pipefail
           python filter_with_gpt.py
 
-      # ---- Étape 3: Email formaté (lien compact 'URL') ----
+      # ---- Étape 3: Email formaté (URL cliquable) ----
       - name: Write email_report.py
         run: |
           set -euo pipefail
-          printf "%s\n" \
+          printf '%s\n' \
           "import os, smtplib, json" \
           "from email.mime.multipart import MIMEMultipart" \
           "from email.mime.text import MIMEText" \
-          "" \
-          "RECIPIENT = os.getenv('RECIPIENT_EMAIL') or 'indrix.mk@gmail.com, stellameftah@gmail.com'" \
-          "SENDER = os.getenv('SENDER_EMAIL')" \
-          "SMTP_HOST = os.getenv('SMTP_HOST')" \
-          "SMTP_PORT = int(os.getenv('SMTP_PORT'))" \
-          "SMTP_USER = os.getenv('SMTP_USER')" \
-          "SMTP_PASS = os.getenv('SMTP_PASS')" \
-          "" \
+          "RECIPIENT = os.getenv(\"RECIPIENT_EMAIL\") or \"indrix.mk@gmail.com, stellameftah@gmail.com\"" \
+          "SENDER = os.getenv(\"SENDER_EMAIL\")" \
+          "SMTP_HOST = os.getenv(\"SMTP_HOST\")" \
+          "SMTP_PORT = int(os.getenv(\"SMTP_PORT\"))" \
+          "SMTP_USER = os.getenv(\"SMTP_USER\")" \
+          "SMTP_PASS = os.getenv(\"SMTP_PASS\")" \
           "def pretty_source(raw):" \
-          "    m={'francetravail':'France Travail','hellowork':'HelloWork','indeed':'Indeed','meteojob':'MeteoJob','adzuna':'Adzuna','alljobs':'AllJobs','linkedin':'LinkedIn','google_jobs':'Google Jobs','lesjeudis':'Les Jeudis','leboncoin':'Le Bon Coin','manpower':'Manpower'}" \
-          "    s=(raw or '').strip().lower(); return m.get(s, raw or '?')" \
-          "" \
+          "    m={\"francetravail\":\"France Travail\",\"hellowork\":\"HelloWork\",\"indeed\":\"Indeed\",\"meteojob\":\"MeteoJob\",\"adzuna\":\"Adzuna\",\"alljobs\":\"AllJobs\",\"linkedin\":\"LinkedIn\",\"google_jobs\":\"Google Jobs\",\"lesjeudis\":\"Les Jeudis\",\"leboncoin\":\"Le Bon Coin\",\"manpower\":\"Manpower\"}" \
+          "    s=(raw or \"\").strip().lower(); return m.get(s, raw or \"?\")" \
           "def build_link(it):" \
-          "    for k in ('offer_url','url','page_url'):" \
-          "        v=(it.get(k) or '').strip();" \
+          "    for k in (\"offer_url\",\"url\",\"page_url\"):" \
+          "        v=(it.get(k) or \"\").strip();" \
           "        if v: return v" \
-          "    src=(it.get('source') or '').strip().lower();" \
-          "    oid=(it.get('offer_id') or '').strip()" \
-          "    if src=='francetravail' and oid: return 'https://candidat.francetravail.fr/offres/recherche/detail/{0}'.format(oid)" \
-          "    return ''" \
-          "" \
-          "data = json.load(open('offers_filtered.json','r',encoding='utf-8'))" \
-          "items = data.get('offers', []) if isinstance(data, dict) else []" \
-          "" \
-          "# écarter pages génériques de recherche" \
+          "    src=(it.get(\"source\") or \"\").strip().lower();" \
+          "    oid=(it.get(\"offer_id\") or \"\").strip()" \
+          "    if src==\"francetravail\" and oid: return \"https://candidat.francetravail.fr/offres/recherche/detail/{0}\".format(oid)" \
+          "    return \"\"" \
+          "data = json.load(open(\"offers_filtered.json\",\"r\",encoding=\"utf-8\"))" \
+          "items = data.get(\"offers\", []) if isinstance(data, dict) else []" \
           "clean=[]" \
           "for it in items:" \
-          "    title=(it.get('title') or '').lower()" \
+          "    title=(it.get(\"title\") or \"\").lower()" \
           "    link=build_link(it)" \
-          "    if (('offre' in title and 'emploi' in title) or 'recherche' in title) and ('/detail/' not in link):" \
+          "    if ((\"offre\" in title and \"emploi\" in title) or \"recherche\" in title) and (\"/detail/\" not in link):" \
           "        continue" \
           "    clean.append(it)" \
-          "" \
-          "html=['<h2>Offres saisonnières - Rapport</h2>','<ol>']" \
+          "html=[\"<h2>Offres saisonnières - Rapport</h2>\",\"<ol>\"]" \
           "for it in clean[:200]:" \
-          "    src=pretty_source(it.get('source','?'))" \
-          "    title=(it.get('title_scraped') or it.get('title') or 'Offre').strip()" \
+          "    src=pretty_source(it.get(\"source\",\"?\"))" \
+          "    title=(it.get(\"title_scraped\") or it.get(\"title\") or \"Offre\").strip()" \
           "    tl=title.lower(); sl=src.lower()" \
-          "    if tl.startswith(sl): title=title[len(src):].lstrip(' :-–—|')" \
-          "    company=(it.get('company_scraped') or it.get('company') or '—').strip()" \
-          "    score=str(it.get('score','?'))" \
-          "    mail=(it.get('employer_email_scraped') or it.get('employer_email') or '—').strip()" \
+          "    if tl.startswith(sl): title=title[len(src):].lstrip(\" :-–—|\")" \
+          "    company=(it.get(\"company_scraped\") or it.get(\"company\") or \"—\").strip()" \
+          "    score=str(it.get(\"score\",\"?\"))" \
+          "    mail=(it.get(\"employer_email_scraped\") or it.get(\"employer_email\") or \"—\").strip()" \
           "    link=build_link(it)" \
-          "    url_field = ('<a href=\"'+link+'\">URL</a>') if link else 'URL indisponible'" \
-          "    line = '{0}: {1} - {2} - Score: {3} - {4} - {5}'" \
-          "    li = '<li>' + line.format(src, title, company, score, url_field, mail) + '</li>'" \
+          "    url_field = (\"<a href=\\\"\"+link+\"\\\">URL</a>\") if link else \"URL indisponible\"" \
+          "    line = \"{0}: {1} - {2} - Score: {3} - {4} - {5}\"" \
+          "    li = \"<li>\" + line.format(src, title, company, score, url_field, mail) + \"</li>\"" \
           "    html.append(li)" \
-          "html.append('</ol>')" \
-          "" \
-          "msg=MIMEMultipart('alternative'); msg['Subject']='Veille offres saisonnières (extraction HTML via GPT)'; msg['From']=SENDER; msg['To']=RECIPIENT" \
-          "msg.attach(MIMEText('\\n'.join(html),'html','utf-8'))" \
+          "html.append(\"</ol>\")" \
+          "msg=MIMEMultipart(\"alternative\"); msg[\"Subject\"]=\"Veille offres saisonnières (extraction HTML via GPT)\"; msg[\"From\"]=SENDER; msg[\"To\"]=RECIPIENT" \
+          "msg.attach(MIMEText(\"\\n\".join(html),\"html\",\"utf-8\"))" \
           "with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as s:" \
-          "    s.starttls(); s.login(SMTP_USER, SMTP_PASS); s.sendmail(SMTP_USER, [x.strip() for x in RECIPIENT.split(',') if x.strip()], msg.as_string())" \
-          "print('Email sent to', RECIPIENT)" \
+          "    s.starttls(); s.login(SMTP_USER, SMTP_PASS); s.sendmail(SMTP_USER, [x.strip() for x in RECIPIENT.split(\",\") if x.strip()], msg.as_string())" \
+          "print(\"Email sent to\", RECIPIENT)" \
           > email_report.py
 
       - name: Send email
@@ -321,7 +311,6 @@ jobs:
           set -euo pipefail
           python email_report.py
 
-      # ---- Artifacts pour debug ----
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
